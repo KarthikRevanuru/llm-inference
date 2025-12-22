@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  orpheus-tts:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - MODEL_NAME=canopylabs/orpheus-3b-0.1-ft
+      - MAX_MODEL_LEN=2048
+      - MAX_NUM_SEQS=8
+      - GPU_MEMORY_UTILIZATION=0.90
+      - LOG_LEVEL=info
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./models:/root/.cache/huggingface  # Cache downloaded models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
