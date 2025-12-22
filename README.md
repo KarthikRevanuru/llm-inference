@@ -16,30 +16,51 @@ High-performance streaming Text-to-Speech API using [Orpheus-3B](https://hugging
 ### Prerequisites
 
 - Python 3.10+
-- CUDA-capable GPU (8GB+ VRAM recommended)
-- NVIDIA drivers and CUDA toolkit installed
+- GPU with 8GB+ VRAM:
+  - **NVIDIA**: CUDA toolkit and drivers (recommended)
+  - **AMD**: ROCm 6.0+ (experimental)
+- Or CPU-only (very slow)
 
 ### Local Installation
 
-1. **Clone and install dependencies**:
-```bash
-git clone <your-repo-url>
-cd exo-juno
-pip install -r requirements.txt
-```
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/KarthikRevanuru/llm-inference.git
+   cd llm-inference
+   ```
 
-2. **Configure settings** (optional):
-```bash
-cp config.ini.example config.ini
-# Edit config.ini to customize settings
-```
+2. **Run setup** (auto-detects GPU or prompts for choice):
+   ```bash
+   python setup.py
+   ```
+   
+   This will:
+   - Detect your GPU (NVIDIA/AMD) or ask you to choose
+   - Install the correct dependencies
+   - Create `config.ini` from the example
 
 3. **Start the server**:
-```bash
-python server.py
-```
+   ```bash
+   python server.py
+   ```
 
 The server will start on `http://localhost:8000` and automatically download the model on first run.
+
+### Manual Installation (Advanced)
+
+If you prefer manual setup:
+
+```bash
+# NVIDIA (CUDA)
+pip install -r requirements.txt
+
+# AMD (ROCm 6.0+)
+pip install torch --index-url https://download.pytorch.org/whl/rocm6.0
+pip install -r requirements-rocm.txt
+
+# CPU only (slow!)
+pip install -r requirements-cpu.txt
+```
 
 ### Docker Deployment
 

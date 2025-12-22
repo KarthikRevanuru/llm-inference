@@ -1,0 +1,19 @@
+# Core dependencies (without PyTorch - installed separately for ROCm)
+# vllm ROCm build - install via: pip install vllm --extra-index-url https://download.pytorch.org/whl/rocm6.0
+orpheus-speech
+
+# API Server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+pydantic>=2.0.0
+
+# Streaming and async
+sse-starlette>=1.6.5
+aiofiles>=23.0.0
+
+# Monitoring and metrics
+prometheus-client>=0.19.0
+
+# Utilities
+numpy>=1.24.0
