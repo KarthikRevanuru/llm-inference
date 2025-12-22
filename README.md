@@ -28,10 +28,10 @@ cd exo-juno
 pip install -r requirements.txt
 ```
 
-2. **Configure environment** (optional):
+2. **Configure settings** (optional):
 ```bash
-cp .env.example .env
-# Edit .env to customize settings
+cp config.ini.example config.ini
+# Edit config.ini to customize settings
 ```
 
 3. **Start the server**:
@@ -183,7 +183,7 @@ This will:
 
 ### GPU Memory Utilization
 
-Adjust in `.env` or `config.py`:
+Adjust in `config.ini` or `config.py`:
 ```python
 GPU_MEMORY_UTILIZATION=0.90  # Use 90% of GPU memory
 ```

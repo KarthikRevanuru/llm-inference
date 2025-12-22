@@ -1,0 +1,30 @@
+[model]
+name = canopylabs/orpheus-3b-0.1-ft
+max_model_len = 2048
+tensor_parallel_size = 1
+gpu_memory_utilization = 0.90
+
+[batching]
+max_num_seqs = 8
+max_batch_size = 8
+
+[server]
+host = 0.0.0.0
+port = 8000
+workers = 1
+log_level = info
+
+[audio]
+sample_rate = 24000
+channels = 1
+sample_width = 2
+default_voice = tara
+
+[generation]
+default_temperature = 1.0
+default_top_p = 0.95
+default_repetition_penalty = 1.1
+
+[limits]
+max_prompt_length = 1000
+request_timeout = 60

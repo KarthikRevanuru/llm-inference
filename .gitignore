@@ -9,8 +9,8 @@ venv/
 env/
 ENV/
 
-# Environment variables
-.env
+# Configuration file (copy from config.ini.example)
+config.ini
 
 # Model cache
 models/
