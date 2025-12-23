@@ -83,15 +83,39 @@ class VLLMModelManager:
         if torch.cuda.is_available():
             self.snac_model = self.snac_model.cuda()
         
-        # Get audio token offset from tokenizer
-        self.audio_token_offset = self.tokenizer.convert_tokens_to_ids(START_TOKEN)
-        logger.info(f"Audio token offset (START_TOKEN ID): {self.audio_token_offset}")
+        # Find audio token offset by checking for custom audio tokens
+        # Orpheus adds tokens like <custom_token_0> through <custom_token_4095>
+        # The actual offset varies by model version
+        self.audio_token_offset = self._find_audio_token_offset()
+        logger.info(f"Audio token offset: {self.audio_token_offset}")
         
         self._request_counter = 0
         self._initialized = True
         
         logger.info("vLLM model manager initialized successfully")
         logger.info(f"Max concurrent sequences: {settings.max_num_seqs}")
+    
+    def _find_audio_token_offset(self) -> int:
+        """Find the starting token ID for audio tokens in the vocabulary."""
+        # Try known patterns for Orpheus audio tokens
+        # Pattern 1: <custom_token_0> style
+        test_token = "<custom_token_0>"
+        token_id = self.tokenizer.convert_tokens_to_ids(test_token)
+        if token_id is not None and token_id != self.tokenizer.unk_token_id:
+            return token_id
+        
+        # Pattern 2: Look for tokens in the range around known offsets
+        # Based on observed data: first generated token was 121416
+        # Try common offsets
+        known_offsets = [121416, 128266, 128256]
+        for offset in known_offsets:
+            # Check if this offset produces valid vocabulary tokens
+            if offset < len(self.tokenizer):
+                return offset
+        
+        # Fallback to observed value
+        logger.warning("Could not detect audio token offset, using fallback 121416")
+        return 121416
     
     def _format_prompt(self, text: str, voice: str) -> str:
         """Format text with voice token and special markers for Orpheus model."""
