@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, validator
 from sse_starlette.sse import EventSourceResponse
 
@@ -79,6 +79,10 @@ class TTSRequest(BaseModel):
         ge=1.0, le=2.0,
         description="Repetition penalty (must be >= 1.1 for stable generation)"
     )
+    output_path: Optional[str] = Field(
+        default=None,
+        description="Optional path to save the generated WAV file. If not provided, audio is returned in response."
+    )
     
     @validator('prompt')
     def validate_prompt(cls, v):
@@ -105,6 +109,7 @@ class TTSResponse(BaseModel):
     realtime_factor: float
     sample_rate: int = settings.sample_rate
     channels: int = settings.channels
+    output_path: Optional[str] = None
 
 
 @app.get("/health")
@@ -277,7 +282,32 @@ async def generate_tts(request: TTSRequest):
         
         logger.info(f"Generated {duration:.2f}s audio in {generation_time:.2f}s (RTF: {rtf:.2f}x)")
         
-        # Return WAV file
+        # Save to file if output_path provided
+        if request.output_path:
+            import os
+            # Ensure directory exists
+            output_dir = os.path.dirname(request.output_path)
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+            
+            # Write WAV file to disk
+            wav_buffer.seek(0)
+            with open(request.output_path, 'wb') as f:
+                f.write(wav_buffer.read())
+            
+            logger.info(f"Saved audio to: {request.output_path}")
+            
+            # Return JSON response with metadata
+            return JSONResponse(content={
+                "audio_duration_seconds": duration,
+                "generation_time_seconds": generation_time,
+                "realtime_factor": rtf,
+                "sample_rate": settings.sample_rate,
+                "channels": settings.channels,
+                "output_path": request.output_path
+            })
+        
+        # Return WAV file in response (default behavior)
         wav_buffer.seek(0)
         return StreamingResponse(
             wav_buffer,

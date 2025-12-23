@@ -31,18 +31,20 @@ class ModelManager:
         logger.info(f"Initializing Orpheus model: {settings.model_name}")
         
         try:
-            # Initialize OrpheusModel with vLLM backend
+            # Initialize OrpheusModel
+            # Note: vLLM-specific parameters (max_model_len, tensor_parallel_size, etc.)
+            # are not directly supported by OrpheusModel - they may be configured
+            # via environment variables or the library's internal configuration
             self.model = OrpheusModel(
                 model_name=settings.model_name,
-                max_model_len=settings.max_model_len,
-                tensor_parallel_size=settings.tensor_parallel_size,
-                gpu_memory_utilization=settings.gpu_memory_utilization,
-                max_num_seqs=settings.max_num_seqs,
             )
             
             logger.info("Model initialized successfully")
             logger.info(f"Max concurrent sequences: {settings.max_num_seqs}")
             logger.info(f"GPU memory utilization: {settings.gpu_memory_utilization}")
+            
+            # Lock for serializing generation requests (orpheus_tts uses hardcoded request_id)
+            self._generation_lock = threading.Lock()
             
             self._initialized = True
             
@@ -80,18 +82,25 @@ class ModelManager:
             logger.info(f"Generating speech for prompt (length: {len(prompt)})")
             logger.debug(f"Voice: {voice}, temp: {temperature}, top_p: {top_p}, rep_penalty: {repetition_penalty}")
             
-            # Generate speech tokens (streaming)
-            syn_tokens = self.model.generate_speech(
-                prompt=prompt,
-                voice=voice,
-                temperature=temperature,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-            )
+            # Acquire lock to prevent concurrent requests (orpheus_tts uses hardcoded request_id)
+            # This serializes requests but ensures stability
+            with self._generation_lock:
+                # Generate speech tokens (streaming)
+                syn_tokens = self.model.generate_speech(
+                    prompt=prompt,
+                    voice=voice,
+                    temperature=temperature,
+                    top_p=top_p,
+                    repetition_penalty=repetition_penalty,
+                )
+                
+                # Collect all chunks while holding the lock
+                # We must complete generation before releasing the lock
+                audio_chunks = list(syn_tokens)
             
-            # Stream audio chunks
+            # Stream audio chunks (lock released, safe to yield)
             chunk_count = 0
-            for audio_chunk in syn_tokens:
+            for audio_chunk in audio_chunks:
                 chunk_count += 1
                 yield audio_chunk
             
@@ -106,5 +115,27 @@ class ModelManager:
         return self._initialized and self.model is not None
 
 
-# Global model manager instance
-model_manager = ModelManager()
+# Global model manager instance (lazy initialization to avoid multiprocessing issues)
+_model_manager: Optional[ModelManager] = None
+_init_lock = threading.Lock()
+
+
+def get_model_manager() -> ModelManager:
+    """Get or create the global model manager instance (lazy initialization)."""
+    global _model_manager
+    if _model_manager is None:
+        with _init_lock:
+            if _model_manager is None:
+                _model_manager = ModelManager()
+    return _model_manager
+
+
+# For backwards compatibility - but only when accessed in main process
+class _LazyModelManager:
+    """Lazy wrapper that defers initialization until first attribute access."""
+    
+    def __getattr__(self, name):
+        return getattr(get_model_manager(), name)
+
+
+model_manager = _LazyModelManager()
