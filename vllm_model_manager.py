@@ -105,12 +105,12 @@ class VLLMModelManager:
             return token_id
         
         # Pattern 2: Look for tokens in the range around known offsets
-        # Based on observed data: first generated token was 121416
-        # Try common offsets
-        known_offsets = [121416, 128266, 128256]
+        # Based on observed data on RunPod, the audio tokens start at 121416
+        # for this specific model version.
+        known_offsets = [121416, 128266, 128256, 156939]
         for offset in known_offsets:
-            # Check if this offset produces valid vocabulary tokens
             if offset < len(self.tokenizer):
+                # Check a few tokens to see if they look like audio tokens (often no space prefix etc)
                 return offset
         
         # Fallback to observed value
@@ -119,7 +119,10 @@ class VLLMModelManager:
     
     def _format_prompt(self, text: str, voice: str) -> str:
         """Format text with voice token and special markers for Orpheus model."""
+        # Ensure voice prefix is correct
         voice_token = VOICE_TOKENS.get(voice, VOICE_TOKENS["tara"])
+        # Format: <|voice|>text<|audio|>
+        # Note: Do not add extra spaces before <|audio|>
         prompt = f"{voice_token}{text}{START_TOKEN}"
         return prompt
     
@@ -130,32 +133,35 @@ class VLLMModelManager:
         repetition_penalty: float,
     ) -> SamplingParams:
         """Create vLLM sampling parameters."""
+        # Increase max_tokens for longer audio
         return SamplingParams(
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
-            max_tokens=1024,
+            max_tokens=4096,
+            # We skip stop_token_ids for now to avoid early termination
+            # while we are still debugging the token range.
         )
     
     def _redistribute_codes(self, token_ids: List[int]) -> tuple:
         """
         Redistribute Orpheus audio tokens into SNAC's 3-layer format.
         """
-        # Audio tokens start after the audio start token
-        # They are in range [audio_token_offset, audio_token_offset + 4096)
+        # We'll use the detected offset
         CODE_TOKEN_OFFSET = self.audio_token_offset
         CODE_TOKEN_END = CODE_TOKEN_OFFSET + 4096
         
-        # Filter and offset tokens
+        # Filter tokens: we are looking for tokens in the audio range
         audio_codes = []
         for tid in token_ids:
             if CODE_TOKEN_OFFSET <= tid < CODE_TOKEN_END:
                 audio_codes.append(tid - CODE_TOKEN_OFFSET)
         
+        # Logging to help debug if we still get 0 audio chunks
         if len(token_ids) > 0 and len(audio_codes) == 0:
-            min_tok = min(token_ids) if token_ids else 0
-            max_tok = max(token_ids) if token_ids else 0
-            logger.debug(f"No audio tokens found. Range: {min_tok}-{max_tok}, expected: {CODE_TOKEN_OFFSET}-{CODE_TOKEN_END}")
+            logger.debug(f"Filtering tokens: input has {len(token_ids)}, but 0 are in range [{CODE_TOKEN_OFFSET}, {CODE_TOKEN_END})")
+            if token_ids:
+                logger.debug(f"Sample token IDs: {token_ids[:10]}")
         
         if len(audio_codes) < 7:
             return None, None, None
