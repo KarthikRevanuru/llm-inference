@@ -51,6 +51,8 @@ class OrpheusTTSClient:
             
             chunk_count = 0
             
+            event_type = None  # Initialize event_type
+            
             # Stream response
             with requests.post(url, json=payload, stream=True) as response:
                 response.raise_for_status()
@@ -78,25 +80,45 @@ class OrpheusTTSClient:
                         # Handle different event types
                         if event_type == 'audio_chunk':
                             # Decode base64 audio chunk
-                            audio_bytes = base64.b64decode(data)
-                            wf.writeframes(audio_bytes)
-                            chunk_count += 1
-                            
-                            if chunk_count % 10 == 0:
-                                print(f"  Received {chunk_count} chunks...")
+                            try:
+                                audio_bytes = base64.b64decode(data)
+                                wf.writeframes(audio_bytes)
+                                chunk_count += 1
+                                
+                                if chunk_count % 10 == 0:
+                                    print(f"  Received {chunk_count} chunks...")
+                            except Exception as e:
+                                print(f"  Warning: Failed to decode chunk: {e}")
                         
                         elif event_type == 'complete':
                             # Parse completion metadata
-                            metadata = json.loads(data)
-                            print(f"\n✓ Complete!")
-                            print(f"  Audio duration: {metadata['audio_duration_seconds']:.2f}s")
-                            print(f"  Generation time: {metadata['generation_time_seconds']:.2f}s")
-                            print(f"  Realtime factor: {metadata['realtime_factor']:.2f}x")
-                            print(f"  Total chunks: {metadata['total_chunks']}")
+                            try:
+                                metadata = json.loads(data)
+                                print(f"\n✓ Complete!")
+                                print(f"  Audio duration: {metadata.get('audio_duration_seconds', 0):.2f}s")
+                                print(f"  Generation time: {metadata.get('generation_time_seconds', 0):.2f}s")
+                                print(f"  Realtime factor: {metadata.get('realtime_factor', 0):.2f}x")
+                                print(f"  Total chunks: {metadata.get('total_chunks', chunk_count)}")
+                            except json.JSONDecodeError:
+                                # Not JSON, might be a simple completion message
+                                print(f"\n✓ Complete! ({chunk_count} chunks)")
                         
                         elif event_type == 'error':
                             print(f"✗ Error: {data}")
                             return
+                        
+                        elif event_type is None:
+                            # No event type specified, try to handle as audio data
+                            try:
+                                audio_bytes = base64.b64decode(data)
+                                wf.writeframes(audio_bytes)
+                                chunk_count += 1
+                                
+                                if chunk_count % 10 == 0:
+                                    print(f"  Received {chunk_count} chunks...")
+                            except Exception:
+                                # Not audio data, skip
+                                pass
         
         print(f"\n💾 Saved to: {output_file}")
     
