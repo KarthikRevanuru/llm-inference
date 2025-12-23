@@ -82,27 +82,22 @@ class ModelManager:
             logger.info(f"Generating speech for prompt (length: {len(prompt)})")
             logger.debug(f"Voice: {voice}, temp: {temperature}, top_p: {top_p}, rep_penalty: {repetition_penalty}")
             
-            # Acquire lock to prevent concurrent requests (orpheus_tts uses hardcoded request_id)
-            # This serializes requests but ensures stability
+            # Generate speech tokens with TRUE streaming
+            # Note: orpheus_tts library may have issues with concurrent requests
+            # due to hardcoded request_id. For now, we use a lock but yield immediately.
+            chunk_count = 0
+            
             with self._generation_lock:
-                # Generate speech tokens (streaming)
-                syn_tokens = self.model.generate_speech(
+                # Generate and stream audio chunks immediately as they're produced
+                for audio_chunk in self.model.generate_speech(
                     prompt=prompt,
                     voice=voice,
                     temperature=temperature,
                     top_p=top_p,
                     repetition_penalty=repetition_penalty,
-                )
-                
-                # Collect all chunks while holding the lock
-                # We must complete generation before releasing the lock
-                audio_chunks = list(syn_tokens)
-            
-            # Stream audio chunks (lock released, safe to yield)
-            chunk_count = 0
-            for audio_chunk in audio_chunks:
-                chunk_count += 1
-                yield audio_chunk
+                ):
+                    chunk_count += 1
+                    yield audio_chunk
             
             logger.info(f"Generated {chunk_count} audio chunks")
             
