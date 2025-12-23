@@ -109,6 +109,60 @@ class VLLMModelManager:
             stop_token_ids=[self.tokenizer.eos_token_id],
         )
     
+    def _redistribute_codes(self, token_ids: List[int]) -> tuple:
+        """
+        Redistribute Orpheus audio tokens into SNAC's 3-layer format.
+        
+        Orpheus outputs 7 tokens per frame in order:
+        [L1_0, L2_0, L2_1, L3_0, L3_1, L3_2, L3_3]
+        
+        These need to be redistributed into 3 separate layers for SNAC.
+        
+        Returns:
+            Tuple of (layer1, layer2, layer3) lists, or (None, None, None) on error
+        """
+        # Audio token offset in Orpheus vocabulary (128266 is the standard offset)
+        CODE_TOKEN_OFFSET = 128266
+        CODE_TOKEN_END = CODE_TOKEN_OFFSET + 4096
+        
+        # Filter and offset tokens to get actual audio codes (0-4095 range)
+        audio_codes = []
+        for tid in token_ids:
+            if CODE_TOKEN_OFFSET <= tid < CODE_TOKEN_END:
+                audio_codes.append(tid - CODE_TOKEN_OFFSET)
+        
+        # Log for debugging
+        if len(token_ids) > 0 and len(audio_codes) == 0:
+            # Check if tokens are in a different range
+            min_tok = min(token_ids) if token_ids else 0
+            max_tok = max(token_ids) if token_ids else 0
+            logger.debug(f"No audio tokens found. Token range: {min_tok}-{max_tok}, expected: {CODE_TOKEN_OFFSET}-{CODE_TOKEN_END}")
+        
+        if len(audio_codes) < 7:
+            return None, None, None
+        
+        # Orpheus generates 7 tokens per timestep
+        # Pattern: [L1, L2_0, L2_1, L3_0, L3_1, L3_2, L3_3]
+        num_frames = len(audio_codes) // 7
+        if num_frames == 0:
+            return None, None, None
+        
+        layer1 = []
+        layer2 = []
+        layer3 = []
+        
+        for i in range(num_frames):
+            base = i * 7
+            layer1.append(audio_codes[base])
+            layer2.append(audio_codes[base + 1])
+            layer2.append(audio_codes[base + 2])
+            layer3.append(audio_codes[base + 3])
+            layer3.append(audio_codes[base + 4])
+            layer3.append(audio_codes[base + 5])
+            layer3.append(audio_codes[base + 6])
+        
+        return layer1, layer2, layer3
+    
     def _tokens_to_audio(self, token_ids: List[int]) -> Optional[bytes]:
         """
         Convert Orpheus audio tokens to PCM audio using SNAC decoder.
@@ -119,39 +173,10 @@ class VLLMModelManager:
         if len(token_ids) < 7:
             return None
         
-        # Filter to only audio tokens (IDs 128266 to 128266+4096)
-        # Audio token offset in Orpheus vocabulary
-        audio_token_start = 128266
-        audio_token_end = audio_token_start + 4096
+        layer1, layer2, layer3 = self._redistribute_codes(token_ids)
         
-        audio_tokens = []
-        for tid in token_ids:
-            if audio_token_start <= tid < audio_token_end:
-                audio_tokens.append(tid - audio_token_start)
-        
-        if len(audio_tokens) < 7:
+        if layer1 is None:
             return None
-        
-        # Reorganize tokens into 3 layers for SNAC
-        # Orpheus outputs: [L1, L2_1, L2_2, L3_1, L3_2, L3_3, L3_4] per frame
-        num_frames = len(audio_tokens) // 7
-        if num_frames == 0:
-            return None
-        
-        layer1 = []
-        layer2 = []
-        layer3 = []
-        
-        for i in range(num_frames):
-            base = i * 7
-            layer1.append(audio_tokens[base])
-            layer2.extend([audio_tokens[base + 1], audio_tokens[base + 2]])
-            layer3.extend([
-                audio_tokens[base + 3],
-                audio_tokens[base + 4],
-                audio_tokens[base + 5],
-                audio_tokens[base + 6]
-            ])
         
         try:
             # Create tensors for SNAC decoder
@@ -229,6 +254,10 @@ class VLLMModelManager:
                 if output.outputs:
                     # Get newly generated token IDs
                     new_token_ids = output.outputs[0].token_ids
+                    
+                    # Debug: Log first few tokens to understand the format
+                    if len(new_token_ids) == 7 and len(collected_tokens) == 0:
+                        logger.info(f"[{request_id}] First 7 tokens: {list(new_token_ids[:7])}")
                     
                     if len(new_token_ids) > len(collected_tokens):
                         # Add new tokens
