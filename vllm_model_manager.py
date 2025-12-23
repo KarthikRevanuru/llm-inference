@@ -118,12 +118,27 @@ class VLLMModelManager:
         return 121416
     
     def _format_prompt(self, text: str, voice: str) -> str:
-        """Format text with voice token and special markers for Orpheus model."""
-        # Ensure voice prefix is correct
-        voice_token = VOICE_TOKENS.get(voice, VOICE_TOKENS["tara"])
-        # Format: <|voice|>text<|audio|>
-        # Note: Do not add extra spaces before <|audio|>
-        prompt = f"{voice_token}{text}{START_TOKEN}"
+        """
+        Format text with specific special tokens for Orpheus-3B.
+        
+        Logic from canopyai/Orpheus-TTS:
+        Prefix: 128259
+        Body: {voice}: {text}
+        Suffix: 128009, 128260, 128261, 128257
+        """
+        prefix_id = 128259
+        suffix_ids = [128009, 128260, 128261, 128257]
+        
+        # Encode the body text
+        body_text = f"{voice}: {text}"
+        body_ids = self.tokenizer.encode(body_text, add_special_tokens=False)
+        
+        # Concatenate all IDs
+        full_ids = [prefix_id] + body_ids + suffix_ids
+        
+        # Decode back to a prompt string for vLLM
+        prompt = self.tokenizer.decode(full_ids)
+        logger.debug(f"Formatted prompt: {prompt}")
         return prompt
     
     def _get_sampling_params(
@@ -133,42 +148,41 @@ class VLLMModelManager:
         repetition_penalty: float,
     ) -> SamplingParams:
         """Create vLLM sampling parameters."""
-        # Increase max_tokens for longer audio
+        # Use a higher max_tokens for audio generation
         return SamplingParams(
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             max_tokens=4096,
-            # We skip stop_token_ids for now to avoid early termination
-            # while we are still debugging the token range.
         )
     
     def _redistribute_codes(self, token_ids: List[int]) -> tuple:
         """
         Redistribute Orpheus audio tokens into SNAC's 3-layer format.
+        
+        Formula: code = tid - offset - (pos_per_frame * 4096)
         """
-        # We'll use the detected offset
-        CODE_TOKEN_OFFSET = self.audio_token_offset
-        CODE_TOKEN_END = CODE_TOKEN_OFFSET + 4096
+        offset = self.audio_token_offset
         
-        # Filter tokens: we are looking for tokens in the audio range
-        audio_codes = []
-        for tid in token_ids:
-            if CODE_TOKEN_OFFSET <= tid < CODE_TOKEN_END:
-                audio_codes.append(tid - CODE_TOKEN_OFFSET)
-        
-        # Logging to help debug if we still get 0 audio chunks
-        if len(token_ids) > 0 and len(audio_codes) == 0:
-            logger.debug(f"Filtering tokens: input has {len(token_ids)}, but 0 are in range [{CODE_TOKEN_OFFSET}, {CODE_TOKEN_END})")
-            if token_ids:
-                logger.debug(f"Sample token IDs: {token_ids[:10]}")
-        
-        if len(audio_codes) < 7:
-            return None, None, None
-        
-        num_frames = len(audio_codes) // 7
+        # Audio tokens must come in frames of 7
+        num_frames = len(token_ids) // 7
         if num_frames == 0:
             return None, None, None
+            
+        audio_codes = []
+        for i in range(num_frames):
+            frame = token_ids[i*7 : (i+1)*7]
+            for pos, tid in enumerate(frame):
+                # Calculate the 0-4095 code for this position
+                code = tid - offset - (pos * 4096)
+                
+                # Validation: if code is wildly out of range, then we aren't in audio mode
+                if not (0 <= code < 4096):
+                    logger.debug(f"Non-audio token detected: {tid} at pos {pos} (calc code: {code})")
+                    # Break generation if we encounter non-audio tokens in the middle
+                    return None, None, None
+                
+                audio_codes.append(code)
         
         layer1 = []
         layer2 = []
