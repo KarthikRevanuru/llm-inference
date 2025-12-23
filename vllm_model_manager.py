@@ -91,23 +91,12 @@ class VLLMModelManager:
     
     def _format_prompt(self, text: str, voice: str) -> str:
         """Format text with voice token and special markers for Orpheus model."""
-        # Orpheus uses a chat-style format with voice as speaker
-        # Format: <|voice|>text<|audio|>
+        # Orpheus format: <|voice|>text<|audio|>
+        # The model should then generate audio tokens after <|audio|>
         voice_token = VOICE_TOKENS.get(voice, VOICE_TOKENS["tara"])
-        formatted = f"{voice_token}{text}"
-        
-        # Apply chat template if available
-        try:
-            messages = [{"role": "user", "content": formatted}]
-            prompt = self.tokenizer.apply_chat_template(
-                messages, 
-                tokenize=False, 
-                add_generation_prompt=True
-            )
-            return prompt
-        except Exception:
-            # Fallback to simple format
-            return f"{formatted}{START_TOKEN}"
+        prompt = f"{voice_token}{text}{START_TOKEN}"
+        logger.debug(f"Formatted prompt: {prompt[:100]}...")
+        return prompt
     
     def _get_sampling_params(
         self,
@@ -118,18 +107,24 @@ class VLLMModelManager:
         """Create vLLM sampling parameters."""
         # Get the end-of-audio token ID if it exists
         eoa_token_id = self.tokenizer.convert_tokens_to_ids(END_TOKEN)
+        
+        # Debug: log token IDs
+        audio_start_id = self.tokenizer.convert_tokens_to_ids(START_TOKEN)
+        logger.info(f"Token IDs - START_TOKEN '{START_TOKEN}': {audio_start_id}, END_TOKEN '{END_TOKEN}': {eoa_token_id}")
+        
         stop_token_ids = []
         
-        # Only add EOA token as stop, not EOS (which causes early termination)
-        if eoa_token_id != self.tokenizer.unk_token_id:
+        # Only add EOA token as stop if it's a valid token
+        if eoa_token_id is not None and eoa_token_id != self.tokenizer.unk_token_id:
             stop_token_ids.append(eoa_token_id)
         
+        # Don't use any stop tokens initially - let it generate freely
         return SamplingParams(
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
-            max_tokens=4096,  # Max audio tokens to generate
-            stop_token_ids=stop_token_ids if stop_token_ids else None,
+            max_tokens=1024,  # Reduce for testing
+            # stop_token_ids=stop_token_ids if stop_token_ids else None,
         )
     
     def _redistribute_codes(self, token_ids: List[int]) -> tuple:
