@@ -2,6 +2,8 @@
 vllm==0.7.3
 orpheus-speech
 torch>=2.0.0
+snac>=1.2.1
+transformers>=4.36.0
 
 # API Server
 fastapi>=0.104.0

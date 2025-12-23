@@ -75,6 +75,24 @@ docker-compose logs -f
 docker-compose down
 ```
 
+### vLLM Direct Mode (True Concurrency)
+
+For high-throughput concurrent TTS, use the vLLM direct server which bypasses the `orpheus_tts` library:
+
+```bash
+# Run vLLM direct server (enables true concurrent request handling)
+python server_vllm.py
+```
+
+**When to use each mode:**
+
+| Mode | Command | Concurrency | Best For |
+|------|---------|-------------|----------|
+| Standard | `python server.py` | Sequential (locked) | Single user, simple deployment |
+| vLLM Direct | `python server_vllm.py` | True concurrent | Multi-user, high throughput |
+
+The vLLM direct mode uses `AsyncLLMEngine` with SNAC audio decoding for continuous batching.
+
 ## API Usage
 
 ### Streaming Endpoint (Recommended)
