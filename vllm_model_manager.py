@@ -97,49 +97,62 @@ class VLLMModelManager:
     
     def _find_audio_token_offset(self) -> int:
         """Find the starting token ID for audio tokens in the vocabulary."""
-        # Try known patterns for Orpheus audio tokens
-        # Pattern 1: <custom_token_0> style
+        # Pattern 1: <custom_token_0> style (standard for Orpheus)
         test_token = "<custom_token_0>"
         token_id = self.tokenizer.convert_tokens_to_ids(test_token)
         if token_id is not None and token_id != self.tokenizer.unk_token_id:
             return token_id
         
-        # Pattern 2: Look for tokens in the range around known offsets
-        # Based on observed data on RunPod, the audio tokens start at 121416
-        # for this specific model version.
+        # Pattern 2: Check for <|audio|> which is also a common marker
+        audio_token = "<|audio|>"
+        audio_id = self.tokenizer.convert_tokens_to_ids(audio_token)
+        
+        # Many versions of Orpheus start audio tokens immediately after <|audio|>
+        # or at specific hardcoded offsets like 121416
         known_offsets = [121416, 128266, 128256, 156939]
+        
+        if audio_id is not None and audio_id != self.tokenizer.unk_token_id:
+            # Check if tokens immediately after <|audio|> look like audio tokens
+            # (they won't be in the standard tokenizer vocabulary or will be special)
+            if audio_id + 1 < len(self.tokenizer):
+                return audio_id + 1
+
         for offset in known_offsets:
             if offset < len(self.tokenizer):
-                # Check a few tokens to see if they look like audio tokens (often no space prefix etc)
                 return offset
         
-        # Fallback to observed value
-        logger.warning("Could not detect audio token offset, using fallback 121416")
+        # Fallback
+        logger.warning(f"Could not detect audio token offset, using fallback 121416")
         return 121416
     
-    def _format_prompt(self, text: str, voice: str) -> str:
+    def _format_prompt(self, text: str, voice: str) -> List[int]:
         """
-        Format text with specific special tokens for Orpheus-3B.
+        Format text into token IDs for Orpheus-3B.
         
-        Logic from canopyai/Orpheus-TTS:
-        Prefix: 128259
-        Body: {voice}: {text}
-        Suffix: 128009, 128260, 128261, 128257
+        Standard format: <|voice_token|>text<|audio|>
         """
-        prefix_id = 128259
-        suffix_ids = [128009, 128260, 128261, 128257]
+        # Get voice token (e.g., <|tara|>)
+        voice_token = VOICE_TOKENS.get(voice.lower(), f"<|{voice}|>")
         
-        # Encode the body text
-        body_text = f"{voice}: {text}"
-        body_ids = self.tokenizer.encode(body_text, add_special_tokens=False)
+        # Check if voice token exists in tokenizer
+        voice_id = self.tokenizer.convert_tokens_to_ids(voice_token)
+        if voice_id == self.tokenizer.unk_token_id:
+            logger.warning(f"Voice token {voice_token} not found, using literal '{voice}:'")
+            prompt_text = f"{voice}: {text}<|audio|>"
+            return self.tokenizer.encode(prompt_text, add_special_tokens=True)
         
-        # Concatenate all IDs
-        full_ids = [prefix_id] + body_ids + suffix_ids
+        # Build prompt: [VOICE_ID] + [TEXT_IDS] + [AUDIO_ID]
+        text_ids = self.tokenizer.encode(text, add_special_tokens=False)
+        audio_id = self.tokenizer.convert_tokens_to_ids("<|audio|>")
         
-        # Decode back to a prompt string for vLLM
-        prompt = self.tokenizer.decode(full_ids)
-        logger.debug(f"Formatted prompt: {prompt}")
-        return prompt
+        if audio_id == self.tokenizer.unk_token_id:
+            # Fallback to observed ID for <|audio|> if not in tokenizer by name
+            audio_id = 128257 
+            
+        full_ids = [voice_id] + text_ids + [audio_id]
+        
+        logger.debug(f"Formatted prompt IDs: {full_ids}")
+        return full_ids
     
     def _get_sampling_params(
         self,
@@ -242,14 +255,14 @@ class VLLMModelManager:
         if repetition_penalty < 1.1:
             repetition_penalty = 1.1
         
-        formatted_prompt = self._format_prompt(prompt, voice)
+        # Use token IDs directly to avoid re-tokenization issues in vLLM
+        prompt_token_ids = self._format_prompt(prompt, voice)
         sampling_params = self._get_sampling_params(temperature, top_p, repetition_penalty)
         
         self._request_counter += 1
         request_id = f"tts-{self._request_counter}"
         
         logger.info(f"[{request_id}] Starting generation for prompt (length: {len(prompt)})")
-        logger.info(f"[{request_id}] Formatted prompt: {formatted_prompt[:100]}...")
         
         collected_tokens: List[int] = []
         last_decoded_frame = 0
@@ -257,9 +270,10 @@ class VLLMModelManager:
         
         try:
             async for output in self.engine.generate(
-                formatted_prompt,
-                sampling_params,
+                prompt=None,
+                sampling_params=sampling_params,
                 request_id=request_id,
+                prompt_token_ids=prompt_token_ids,
             ):
                 if output.outputs:
                     out = output.outputs[0]
