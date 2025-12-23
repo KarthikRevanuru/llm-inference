@@ -90,9 +90,24 @@ class VLLMModelManager:
         logger.info(f"Max concurrent sequences: {settings.max_num_seqs}")
     
     def _format_prompt(self, text: str, voice: str) -> str:
-        """Format text with voice token and special markers."""
+        """Format text with voice token and special markers for Orpheus model."""
+        # Orpheus uses a chat-style format with voice as speaker
+        # Format: <|voice|>text<|audio|>
         voice_token = VOICE_TOKENS.get(voice, VOICE_TOKENS["tara"])
-        return f"{voice_token}{text}{START_TOKEN}"
+        formatted = f"{voice_token}{text}"
+        
+        # Apply chat template if available
+        try:
+            messages = [{"role": "user", "content": formatted}]
+            prompt = self.tokenizer.apply_chat_template(
+                messages, 
+                tokenize=False, 
+                add_generation_prompt=True
+            )
+            return prompt
+        except Exception:
+            # Fallback to simple format
+            return f"{formatted}{START_TOKEN}"
     
     def _get_sampling_params(
         self,
@@ -101,12 +116,20 @@ class VLLMModelManager:
         repetition_penalty: float,
     ) -> SamplingParams:
         """Create vLLM sampling parameters."""
+        # Get the end-of-audio token ID if it exists
+        eoa_token_id = self.tokenizer.convert_tokens_to_ids(END_TOKEN)
+        stop_token_ids = []
+        
+        # Only add EOA token as stop, not EOS (which causes early termination)
+        if eoa_token_id != self.tokenizer.unk_token_id:
+            stop_token_ids.append(eoa_token_id)
+        
         return SamplingParams(
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             max_tokens=4096,  # Max audio tokens to generate
-            stop_token_ids=[self.tokenizer.eos_token_id],
+            stop_token_ids=stop_token_ids if stop_token_ids else None,
         )
     
     def _redistribute_codes(self, token_ids: List[int]) -> tuple:
