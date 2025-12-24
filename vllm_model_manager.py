@@ -3,17 +3,26 @@ vLLM-based model manager for Orpheus TTS with true concurrent request support.
 
 This implementation bypasses the orpheus_tts library to use vLLM's AsyncLLMEngine
 directly, enabling continuous batching for efficient concurrent request handling.
+
+CUDA Streams Optimization:
+- Uses multiple CUDA streams for parallel SNAC decoding
+- Runs SNAC decode in thread pool to avoid blocking async event loop
+- Enables true concurrent audio generation for multiple requests
 """
 import asyncio
 import logging
+import threading
 import torch
 import numpy as np
-from typing import AsyncIterator, List, Optional
+from typing import AsyncIterator, List, Optional, Tuple
 from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
 from transformers import AutoTokenizer
 import snac
 
 from config import settings
+
+# CUDA streams configuration
+NUM_CUDA_STREAMS = 4  # Number of parallel CUDA streams for SNAC decoding
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +44,8 @@ END_TOKEN = "<|eoa|>"
 
 # Audio settings
 SAMPLE_RATE = 24000
+CROSSFADE_SAMPLES = 1200  # 50ms crossfade at 24kHz (0.05 * 24000)
+MIN_FRAMES_PER_CHUNK = 7  # Minimum frames before yielding (~300ms of audio)
 
 
 class VLLMModelManager:
@@ -89,7 +100,18 @@ class VLLMModelManager:
         self.audio_token_offset = self._find_audio_token_offset()
         logger.info(f"Audio token offset: {self.audio_token_offset}")
         
+        # Initialize CUDA streams for parallel SNAC decoding
+        self._cuda_streams: List[torch.cuda.Stream] = []
+        if torch.cuda.is_available():
+            self._cuda_streams = [torch.cuda.Stream() for _ in range(NUM_CUDA_STREAMS)]
+            logger.info(f"Created {NUM_CUDA_STREAMS} CUDA streams for parallel SNAC decoding")
+        
+        # Thread-safe counters
+        self._stream_idx = 0
+        self._stream_lock = threading.Lock()
         self._request_counter = 0
+        self._request_lock = threading.Lock()
+        
         self._initialized = True
         
         logger.info("vLLM model manager initialized successfully")
@@ -214,7 +236,7 @@ class VLLMModelManager:
         return layer1, layer2, layer3
     
     def _tokens_to_audio(self, token_ids: List[int]) -> Optional[bytes]:
-        """Convert Orpheus audio tokens to PCM audio using SNAC decoder."""
+        """Convert Orpheus audio tokens to PCM audio using SNAC decoder (sync version)."""
         if len(token_ids) < 7:
             return None
         
@@ -243,6 +265,121 @@ class VLLMModelManager:
             logger.warning(f"SNAC decode error: {e}")
             return None
     
+    def _get_next_stream(self) -> Optional[torch.cuda.Stream]:
+        """Get the next CUDA stream in round-robin fashion (thread-safe)."""
+        if not self._cuda_streams:
+            return None
+        
+        with self._stream_lock:
+            stream = self._cuda_streams[self._stream_idx]
+            self._stream_idx = (self._stream_idx + 1) % len(self._cuda_streams)
+            return stream
+    
+    def _tokens_to_audio_in_stream(
+        self, 
+        token_ids: List[int], 
+        stream: Optional[torch.cuda.Stream]
+    ) -> Optional[bytes]:
+        """
+        Convert tokens to audio using a specific CUDA stream.
+        
+        This method is designed to be called from asyncio.to_thread() to avoid
+        blocking the async event loop while enabling parallel SNAC decoding.
+        """
+        if len(token_ids) < 7:
+            return None
+        
+        layer1, layer2, layer3 = self._redistribute_codes(token_ids)
+        
+        if layer1 is None:
+            return None
+        
+        try:
+            device = next(self.snac_model.parameters()).device
+            codes = [
+                torch.tensor([layer1], dtype=torch.long, device=device),
+                torch.tensor([layer2], dtype=torch.long, device=device),
+                torch.tensor([layer3], dtype=torch.long, device=device),
+            ]
+            
+            # Use CUDA stream for parallel execution
+            if stream is not None:
+                with torch.cuda.stream(stream):
+                    with torch.no_grad():
+                        audio = self.snac_model.decode(codes)
+                # Wait for this stream to complete
+                stream.synchronize()
+            else:
+                # Fallback: no CUDA streams available
+                with torch.no_grad():
+                    audio = self.snac_model.decode(codes)
+            
+            audio_np = audio.squeeze().cpu().numpy()
+            audio_int16 = (audio_np * 32767).astype(np.int16)
+            
+            return audio_int16.tobytes()
+            
+        except Exception as e:
+            logger.warning(f"SNAC decode error in stream: {e}")
+            return None
+    
+    async def _tokens_to_audio_async(self, token_ids: List[int]) -> Optional[bytes]:
+        """
+        Async-compatible audio conversion with CUDA streams.
+        
+        Uses asyncio.to_thread() to run SNAC decode in a thread pool,
+        preventing blocking of the async event loop. Combined with CUDA
+        streams, this enables truly parallel audio decoding for multiple
+        concurrent requests.
+        """
+        stream = self._get_next_stream()
+        return await asyncio.to_thread(
+            self._tokens_to_audio_in_stream, token_ids, stream
+        )
+    
+    def _apply_crossfade(
+        self, 
+        prev_audio: Optional[np.ndarray], 
+        new_audio: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Apply crossfade between previous and new audio chunks.
+        
+        Returns:
+            Tuple of (audio_to_yield, overlap_for_next_chunk)
+        """
+        if prev_audio is None or len(prev_audio) == 0:
+            # First chunk: keep overlap at end for next crossfade
+            if len(new_audio) > CROSSFADE_SAMPLES:
+                audio_to_yield = new_audio[:-CROSSFADE_SAMPLES]
+                overlap = new_audio[-CROSSFADE_SAMPLES:]
+                return audio_to_yield, overlap
+            else:
+                return np.array([], dtype=np.int16), new_audio
+        
+        # Apply crossfade: fade out prev_audio, fade in new_audio
+        fade_out = np.linspace(1.0, 0.0, CROSSFADE_SAMPLES, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, CROSSFADE_SAMPLES, dtype=np.float32)
+        
+        # Blend the overlap region
+        prev_float = prev_audio.astype(np.float32)
+        new_start_float = new_audio[:CROSSFADE_SAMPLES].astype(np.float32)
+        
+        blended = (prev_float * fade_out + new_start_float * fade_in).astype(np.int16)
+        
+        # Combine: blended region + rest of new audio (minus overlap for next)
+        if len(new_audio) > CROSSFADE_SAMPLES * 2:
+            audio_to_yield = np.concatenate([blended, new_audio[CROSSFADE_SAMPLES:-CROSSFADE_SAMPLES]])
+            overlap = new_audio[-CROSSFADE_SAMPLES:]
+        elif len(new_audio) > CROSSFADE_SAMPLES:
+            audio_to_yield = blended
+            overlap = new_audio[CROSSFADE_SAMPLES:]
+        else:
+            audio_to_yield = blended
+            overlap = np.array([], dtype=np.int16)
+        
+        return audio_to_yield, overlap
+    
     async def generate_speech_stream(
         self,
         prompt: str,
@@ -251,7 +388,13 @@ class VLLMModelManager:
         top_p: float = 0.95,
         repetition_penalty: float = 1.1,
     ) -> AsyncIterator[bytes]:
-        """Generate speech audio in true streaming fashion with concurrent support."""
+        """
+        Generate speech audio in true streaming fashion with concurrent support.
+        
+        Uses incremental SNAC decoding with crossfades for efficient streaming:
+        - Only decodes new frames (not all accumulated tokens)
+        - Applies 50ms crossfade between chunks to prevent audio artifacts
+        """
         if repetition_penalty < 1.1:
             repetition_penalty = 1.1
         
@@ -259,14 +402,17 @@ class VLLMModelManager:
         prompt_token_ids = self._format_prompt(prompt, voice)
         sampling_params = self._get_sampling_params(temperature, top_p, repetition_penalty)
         
-        self._request_counter += 1
-        request_id = f"tts-{self._request_counter}"
+        # Thread-safe request counter increment
+        with self._request_lock:
+            self._request_counter += 1
+            request_id = f"tts-{self._request_counter}"
         
         logger.info(f"[{request_id}] Starting generation for prompt (length: {len(prompt)})")
         
         collected_tokens: List[int] = []
         last_decoded_frame = 0
         chunk_count = 0
+        crossfade_overlap: Optional[np.ndarray] = None  # Overlap buffer for crossfading
         
         try:
             async for output in self.engine.generate(
@@ -283,41 +429,56 @@ class VLLMModelManager:
                     # Debug: Log first output to understand what's happening
                     if len(collected_tokens) == 0 and len(new_token_ids) > 0:
                         logger.info(f"[{request_id}] First output - {len(new_token_ids)} tokens, finish_reason: {finish_reason}")
-                        logger.info(f"[{request_id}] Token IDs: {list(new_token_ids[:min(20, len(new_token_ids))])}")
+                        logger.debug(f"[{request_id}] Token IDs: {list(new_token_ids[:min(20, len(new_token_ids))])}")
                     
                     if len(new_token_ids) > len(collected_tokens):
                         collected_tokens = list(new_token_ids)
                         
                         available_frames = len(collected_tokens) // 7
+                        new_frames = available_frames - last_decoded_frame
                         
-                        if available_frames > last_decoded_frame:
-                            tokens_to_decode = collected_tokens[:available_frames * 7]
-                            audio_bytes = self._tokens_to_audio(tokens_to_decode)
+                        # Only decode when we have enough new frames for a chunk
+                        if new_frames >= MIN_FRAMES_PER_CHUNK:
+                            # Incremental decode: only decode NEW tokens
+                            new_tokens = collected_tokens[last_decoded_frame * 7 : available_frames * 7]
+                            audio_bytes = await self._tokens_to_audio_async(new_tokens)
                             
                             if audio_bytes:
-                                samples_per_frame = 1024
-                                prev_samples = last_decoded_frame * samples_per_frame * 2
-                                new_audio = audio_bytes[prev_samples:]
+                                # Convert bytes to numpy array for crossfade processing
+                                audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
                                 
-                                if new_audio:
+                                # Apply crossfade with previous chunk
+                                audio_to_yield, crossfade_overlap = self._apply_crossfade(
+                                    crossfade_overlap, audio_array
+                                )
+                                
+                                if len(audio_to_yield) > 0:
                                     chunk_count += 1
-                                    yield new_audio
+                                    yield audio_to_yield.tobytes()
                             
                             last_decoded_frame = available_frames
             
             logger.info(f"[{request_id}] Total tokens collected: {len(collected_tokens)}")
             
-            # Final decode
-            if len(collected_tokens) > last_decoded_frame * 7:
-                final_audio = self._tokens_to_audio(collected_tokens)
+            # Final decode: remaining frames
+            available_frames = len(collected_tokens) // 7
+            if available_frames > last_decoded_frame:
+                remaining_tokens = collected_tokens[last_decoded_frame * 7 : available_frames * 7]
+                final_audio = await self._tokens_to_audio_async(remaining_tokens)
                 if final_audio:
-                    prev_samples = last_decoded_frame * 1024 * 2
-                    remaining = final_audio[prev_samples:]
-                    if remaining:
+                    audio_array = np.frombuffer(final_audio, dtype=np.int16)
+                    audio_to_yield, crossfade_overlap = self._apply_crossfade(
+                        crossfade_overlap, audio_array
+                    )
+                    if len(audio_to_yield) > 0:
                         chunk_count += 1
-                        yield remaining
+                        yield audio_to_yield.tobytes()
             
-            logger.info(f"[{request_id}] Generated {chunk_count} audio chunks")
+            # Yield any remaining crossfade overlap
+            if crossfade_overlap is not None and len(crossfade_overlap) > 0:
+                yield crossfade_overlap.tobytes()
+            
+            logger.info(f"[{request_id}] Generated {chunk_count} audio chunks with crossfades")
             
         except Exception as e:
             logger.error(f"[{request_id}] Error generating speech: {e}")
