@@ -43,9 +43,12 @@ class RequestResult:
     request_id: int
     success: bool
     prompt: str
+    answer: str = ""  # Generated text
     tokens: int = 0
     ttft: float = 0.0  # Time to first token
     total_time: float = 0.0
+    start_time: float = 0.0  # Absolute start time (for overlap calculation)
+    end_time: float = 0.0    # Absolute end time (for overlap calculation)
     error: Optional[str] = None
 
 
@@ -103,24 +106,35 @@ async def send_streaming_request(
                     except json.JSONDecodeError:
                         pass
         
-        total_time = time.time() - start_time
+        end_time = time.time()
+        total_time = end_time - start_time
+        generated_text = "".join(tokens)
         
         return RequestResult(
             request_id=request_id,
             success=True,
-            prompt=prompt[:30],
+            prompt=prompt,
+            answer=generated_text,
             tokens=len(tokens),
             ttft=first_token_time or 0,
             total_time=total_time,
+            start_time=start_time,
+            end_time=end_time,
         )
     
     except Exception as e:
+        end_time = time.time()
         return RequestResult(
             request_id=request_id,
             success=False,
-            prompt=prompt[:30],
+            prompt=prompt,
+            answer="",
             error=str(e),
-            total_time=time.time() - start_time,
+            total_time=end_time - start_time,
+            start_time=start_time,
+            end_time=end_time,
+        )
+            end_time=end_time,
         )
 
 
@@ -367,12 +381,10 @@ async def test_staggered_requests(
     ]
     
     results: List[RequestResult] = []
-    start_times: List[float] = []
     
     async def send_with_delay(idx: int, delay: float):
         """Send request after specified delay."""
         await asyncio.sleep(delay)
-        start_times.append(time.time())
         console.print(f"  [dim]→ Request {idx+1} sent at t={delay:.1f}s[/dim]")
         
         async with aiohttp.ClientSession() as session:
@@ -403,28 +415,96 @@ async def test_staggered_requests(
     ttfts = [r.ttft for r in successful if r.ttft > 0]
     avg_ttft = statistics.mean(ttfts) if ttfts else 0
     
-    # Display results
+    # Calculate overlaps for each request
+    def get_overlapping_requests(target_idx: int) -> List[int]:
+        """Find which other requests were running concurrently with target."""
+        target = results[target_idx]
+        if not target.success:
+            return []
+        
+        overlapping = []
+        for i, r in enumerate(results):
+            if i == target_idx or not r.success:
+                continue
+            # Two requests overlap if one starts before the other ends
+            if r.start_time < target.end_time and r.end_time > target.start_time:
+                overlapping.append(i + 1)  # 1-indexed for display
+        return overlapping
+    
+    # Display results with end time and overlaps
     table = Table(title="Staggered Requests Results")
-    table.add_column("Request", justify="right")
+    table.add_column("Req", justify="right")
     table.add_column("Sent At", justify="right")
+    table.add_column("End At", justify="right", style="cyan")
     table.add_column("TTFT", justify="right", style="yellow")
-    table.add_column("Total Time", justify="right")
+    table.add_column("Duration", justify="right")
     table.add_column("Tokens", justify="right", style="green")
+    table.add_column("Overlaps With", style="magenta")
     table.add_column("Status")
     
     for i, r in enumerate(results):
-        sent_at = i * delay_seconds
-        status = "[green]✓[/green]" if r.success else f"[red]✗ {r.error}[/red]"
+        sent_at = r.start_time - global_start if r.start_time else i * delay_seconds
+        end_at = r.end_time - global_start if r.end_time else 0
+        overlaps = get_overlapping_requests(i)
+        overlap_str = ",".join(map(str, overlaps[:5])) if overlaps else "-"
+        if len(overlaps) > 5:
+            overlap_str += f"...+{len(overlaps)-5}"
+        
+        status = "[green]✓[/green]" if r.success else f"[red]✗[/red]"
         table.add_row(
             str(i + 1),
-            f"{sent_at:.1f}s",
+            f"{sent_at:.2f}s",
+            f"{end_at:.2f}s" if r.success else "-",
             f"{r.ttft*1000:.0f}ms" if r.success else "-",
             f"{r.total_time:.2f}s",
             str(r.tokens) if r.success else "-",
+            overlap_str,
             status,
         )
     
     console.print(table)
+    
+    # Timeline visualization
+    console.print()
+    console.print("[bold]Timeline Visualization:[/bold]")
+    console.print("  (each █ = 0.2s, ░ = waiting, █ = processing)")
+    console.print()
+    
+    for i, r in enumerate(results):
+        if not r.success:
+            continue
+        
+        sent_at = r.start_time - global_start
+        end_at = r.end_time - global_start
+        
+        # Create timeline bar
+        scale = 0.2  # seconds per character
+        wait_chars = int(sent_at / scale)
+        active_chars = int((end_at - sent_at) / scale)
+        
+        timeline = "░" * wait_chars + "█" * max(1, active_chars)
+        console.print(f"  Req {i+1:2d}: [{timeline}] {sent_at:.1f}s → {end_at:.1f}s")
+    
+    # Q&A Display
+    console.print()
+    console.print("[bold]Questions & Answers:[/bold]")
+    console.print()
+    
+    for i, r in enumerate(results):
+        if not r.success:
+            console.print(f"  [bold cyan]Q{i+1}:[/bold cyan] {r.prompt}")
+            console.print(f"  [bold red]A{i+1}:[/bold red] [Error: {r.error}]")
+            console.print()
+            continue
+        
+        # Truncate answer if too long
+        answer = r.answer.strip()
+        if len(answer) > 200:
+            answer = answer[:200] + "..."
+        
+        console.print(f"  [bold cyan]Q{i+1}:[/bold cyan] {r.prompt}")
+        console.print(f"  [bold green]A{i+1}:[/bold green] {answer}")
+        console.print()
     
     # Summary
     console.print()
@@ -434,6 +514,11 @@ async def test_staggered_requests(
     console.print(f"  Total Tokens: {total_tokens}")
     console.print(f"  Avg TTFT: {avg_ttft*1000:.0f}ms")
     console.print(f"  Throughput: {total_tokens/total_time:.1f} tok/s")
+    
+    # Calculate average concurrent requests
+    if successful:
+        avg_overlaps = statistics.mean(len(get_overlapping_requests(i)) for i in range(len(results)) if results[i].success)
+        console.print(f"  Avg Concurrent Requests: {avg_overlaps + 1:.1f}")
     
     # Analysis: Did late requests benefit from batching?
     if len(results) >= 4:
