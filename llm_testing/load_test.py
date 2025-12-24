@@ -134,8 +134,6 @@ async def send_streaming_request(
             start_time=start_time,
             end_time=end_time,
         )
-            end_time=end_time,
-        )
 
 
 # ==============================================================================
