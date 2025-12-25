@@ -169,36 +169,52 @@ class VLLMModelManager:
             max_tokens=4096,
         )
     
-    def _redistribute_codes(self, token_ids: List[int]) -> tuple:
+    def _parse_custom_token(self, token_text: str, position: int) -> Optional[int]:
         """
-        Redistribute Orpheus audio tokens into SNAC's 3-layer format.
+        Parse a custom token string and convert to SNAC code.
         
-        Formula: code = tid - offset - (pos_per_frame * 4096)
+        Format: <custom_token_N> where N is the number to extract.
+        Formula: code = N - 10 - ((position % 7) * 4096)
+        
+        Based on Lex-au/Orpheus-FastAPI implementation.
         """
-        offset = self.audio_token_offset
+        CUSTOM_TOKEN_PREFIX = "<custom_token_"
         
-        # Audio tokens must come in frames of 7
-        num_frames = len(token_ids) // 7
-        if num_frames == 0:
-            logger.debug(f"Not enough tokens for a frame: {len(token_ids)} tokens")
-            return None, None, None
+        if CUSTOM_TOKEN_PREFIX not in token_text:
+            return None
         
-        # Debug: log first few token IDs to diagnose issues
-        logger.debug(f"Audio token offset: {offset}, first 14 tokens: {token_ids[:14]}")
+        token_text = token_text.strip()
+        last_token_start = token_text.rfind(CUSTOM_TOKEN_PREFIX)
+        
+        if last_token_start == -1:
+            return None
+        
+        last_token = token_text[last_token_start:]
+        
+        if not (last_token.startswith(CUSTOM_TOKEN_PREFIX) and last_token.endswith(">")):
+            return None
+        
+        try:
+            # Extract the number from <custom_token_N>
+            number_str = last_token[14:-1]  # Remove "<custom_token_" and ">"
+            token_num = int(number_str)
             
-        audio_codes = []
-        for i in range(num_frames):
-            frame = token_ids[i*7 : (i+1)*7]
-            for pos, tid in enumerate(frame):
-                # Calculate the 0-4095 code for this position
-                code = tid - offset - (pos * 4096)
-                
-                # Validation: if code is wildly out of range, then we aren't in audio mode
-                if not (0 <= code < 4096):
-                    logger.warning(f"Non-audio token: tid={tid}, pos={pos}, offset={offset}, code={code}")
-                    return None, None, None
-                
-                audio_codes.append(code)
+            # Apply the formula: code = N - 10 - ((pos % 7) * 4096)
+            code = token_num - 10 - ((position % 7) * 4096)
+            
+            return code
+        except (ValueError, IndexError):
+            return None
+    
+    def _redistribute_codes(self, codes: List[int]) -> tuple:
+        """
+        Redistribute SNAC codes into 3-layer format.
+        
+        Input codes should already be in 0-4095 range.
+        """
+        num_frames = len(codes) // 7
+        if num_frames == 0:
+            return None, None, None
         
         layer1 = []
         layer2 = []
@@ -206,13 +222,13 @@ class VLLMModelManager:
         
         for i in range(num_frames):
             base = i * 7
-            layer1.append(audio_codes[base])
-            layer2.append(audio_codes[base + 1])
-            layer2.append(audio_codes[base + 2])
-            layer3.append(audio_codes[base + 3])
-            layer3.append(audio_codes[base + 4])
-            layer3.append(audio_codes[base + 5])
-            layer3.append(audio_codes[base + 6])
+            layer1.append(codes[base])
+            layer2.append(codes[base + 1])
+            layer2.append(codes[base + 2])
+            layer3.append(codes[base + 3])
+            layer3.append(codes[base + 4])
+            layer3.append(codes[base + 5])
+            layer3.append(codes[base + 6])
         
         return layer1, layer2, layer3
     
@@ -318,6 +334,52 @@ class VLLMModelManager:
             self._tokens_to_audio_in_stream, token_ids, stream
         )
     
+    def _snac_decode_in_stream(
+        self,
+        layer1: List[int],
+        layer2: List[int],
+        layer3: List[int],
+        stream: Optional[torch.cuda.Stream]
+    ) -> Optional[bytes]:
+        """Decode SNAC layer codes to audio."""
+        try:
+            device = next(self.snac_model.parameters()).device
+            codes = [
+                torch.tensor([layer1], dtype=torch.long, device=device),
+                torch.tensor([layer2], dtype=torch.long, device=device),
+                torch.tensor([layer3], dtype=torch.long, device=device),
+            ]
+            
+            if stream is not None:
+                with torch.cuda.stream(stream):
+                    with torch.no_grad():
+                        audio = self.snac_model.decode(codes)
+                stream.synchronize()
+            else:
+                with torch.no_grad():
+                    audio = self.snac_model.decode(codes)
+            
+            audio_np = audio.squeeze().cpu().numpy()
+            audio_int16 = (audio_np * 32767).astype(np.int16)
+            
+            return audio_int16.tobytes()
+            
+        except Exception as e:
+            logger.warning(f"SNAC decode error: {e}")
+            return None
+    
+    async def _snac_decode_async(
+        self,
+        layer1: List[int],
+        layer2: List[int],
+        layer3: List[int]
+    ) -> Optional[bytes]:
+        """Async wrapper for SNAC decoding with layer codes."""
+        stream = self._get_next_stream()
+        return await asyncio.to_thread(
+            self._snac_decode_in_stream, layer1, layer2, layer3, stream
+        )
+    
     def _apply_crossfade(
         self, 
         prev_audio: Optional[np.ndarray], 
@@ -390,14 +452,14 @@ class VLLMModelManager:
         
         logger.info(f"[{request_id}] Starting generation for prompt (length: {len(prompt)})")
         
-        collected_tokens: List[int] = []
+        collected_codes: List[int] = []  # SNAC codes (0-4095)
+        code_position = 0  # Position counter for token parsing
         last_decoded_frame = 0
         chunk_count = 0
-        crossfade_overlap: Optional[np.ndarray] = None  # Overlap buffer for crossfading
+        crossfade_overlap: Optional[np.ndarray] = None
         
         try:
             # Orpheus-3B prompt format: <|audio|>voice: text<|eot_id|>
-            # Based on Lex-au/Orpheus-FastAPI reference implementation
             prompt_text = f"<|audio|>{voice}: {prompt}<|eot_id|>"
             logger.info(f"[{request_id}] Prompt: {prompt_text}")
             
@@ -409,30 +471,39 @@ class VLLMModelManager:
                 if output.outputs:
                     out = output.outputs[0]
                     new_token_ids = out.token_ids
-                    finish_reason = out.finish_reason
                     
-                    # Debug: Log first output to understand what's happening
-                    if len(collected_tokens) == 0 and len(new_token_ids) > 0:
-                        logger.info(f"[{request_id}] First output - {len(new_token_ids)} tokens, finish_reason: {finish_reason}")
-                        logger.debug(f"[{request_id}] Token IDs: {list(new_token_ids[:min(20, len(new_token_ids))])}")
+                    # Process new tokens: decode to text and parse
+                    start_idx = len(collected_codes)  # How many we've already processed
                     
-                    if len(new_token_ids) > len(collected_tokens):
-                        collected_tokens = list(new_token_ids)
+                    for tid in new_token_ids[start_idx:]:
+                        # Decode token ID to text
+                        token_text = self.tokenizer.decode([tid])
                         
-                        available_frames = len(collected_tokens) // 7
-                        new_frames = available_frames - last_decoded_frame
+                        # Parse custom token to get SNAC code
+                        code = self._parse_custom_token(token_text, code_position)
                         
-                        # Only decode when we have enough new frames for a chunk
-                        if new_frames >= MIN_FRAMES_PER_CHUNK:
-                            # Incremental decode: only decode NEW tokens
-                            new_tokens = collected_tokens[last_decoded_frame * 7 : available_frames * 7]
-                            audio_bytes = await self._tokens_to_audio_async(new_tokens)
+                        if code is not None and 0 <= code < 4096:
+                            collected_codes.append(code)
+                            code_position += 1
+                        elif code is not None:
+                            # Log invalid codes for debugging
+                            if len(collected_codes) < 5:
+                                logger.debug(f"[{request_id}] Invalid code {code} from token '{token_text}'")
+                    
+                    # Check if we have enough for audio generation
+                    available_frames = len(collected_codes) // 7
+                    new_frames = available_frames - last_decoded_frame
+                    
+                    if new_frames >= MIN_FRAMES_PER_CHUNK:
+                        # Decode new frames
+                        new_codes = collected_codes[last_decoded_frame * 7 : available_frames * 7]
+                        layer1, layer2, layer3 = self._redistribute_codes(new_codes)
+                        
+                        if layer1 is not None:
+                            audio_bytes = await self._snac_decode_async(layer1, layer2, layer3)
                             
                             if audio_bytes:
-                                # Convert bytes to numpy array for crossfade processing
                                 audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-                                
-                                # Apply crossfade with previous chunk
                                 audio_to_yield, crossfade_overlap = self._apply_crossfade(
                                     crossfade_overlap, audio_array
                                 )
@@ -440,33 +511,34 @@ class VLLMModelManager:
                                 if len(audio_to_yield) > 0:
                                     chunk_count += 1
                                     yield audio_to_yield.tobytes()
-                            
-                            last_decoded_frame = available_frames
+                        
+                        last_decoded_frame = available_frames
             
-            logger.info(f"[{request_id}] Total tokens collected: {len(collected_tokens)}")
+            logger.info(f"[{request_id}] Total codes collected: {len(collected_codes)}")
             
             # Final decode: remaining frames
-            available_frames = len(collected_tokens) // 7
-            logger.debug(f"[{request_id}] Final decode: {available_frames} frames, last_decoded={last_decoded_frame}")
+            available_frames = len(collected_codes) // 7
             if available_frames > last_decoded_frame:
-                remaining_tokens = collected_tokens[last_decoded_frame * 7 : available_frames * 7]
-                logger.debug(f"[{request_id}] Decoding {len(remaining_tokens)} tokens")
-                final_audio = await self._tokens_to_audio_async(remaining_tokens)
-                logger.debug(f"[{request_id}] Final audio result: {len(final_audio) if final_audio else 'None'} bytes")
-                if final_audio:
-                    audio_array = np.frombuffer(final_audio, dtype=np.int16)
-                    audio_to_yield, crossfade_overlap = self._apply_crossfade(
-                        crossfade_overlap, audio_array
-                    )
-                    if len(audio_to_yield) > 0:
-                        chunk_count += 1
-                        yield audio_to_yield.tobytes()
+                remaining_codes = collected_codes[last_decoded_frame * 7 : available_frames * 7]
+                logger.debug(f"[{request_id}] Final decode: {len(remaining_codes)} codes")
+                layer1, layer2, layer3 = self._redistribute_codes(remaining_codes)
+                
+                if layer1 is not None:
+                    final_audio = await self._snac_decode_async(layer1, layer2, layer3)
+                    if final_audio:
+                        audio_array = np.frombuffer(final_audio, dtype=np.int16)
+                        audio_to_yield, crossfade_overlap = self._apply_crossfade(
+                            crossfade_overlap, audio_array
+                        )
+                        if len(audio_to_yield) > 0:
+                            chunk_count += 1
+                            yield audio_to_yield.tobytes()
             
             # Yield any remaining crossfade overlap
             if crossfade_overlap is not None and len(crossfade_overlap) > 0:
                 yield crossfade_overlap.tobytes()
             
-            logger.info(f"[{request_id}] Generated {chunk_count} audio chunks with crossfades")
+            logger.info(f"[{request_id}] Generated {chunk_count} audio chunks")
             
         except Exception as e:
             logger.error(f"[{request_id}] Error generating speech: {e}")
