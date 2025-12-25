@@ -44,8 +44,8 @@ END_TOKEN = "<|eoa|>"
 
 # Audio settings
 SAMPLE_RATE = 24000
-CROSSFADE_SAMPLES = 1200  # 50ms crossfade at 24kHz
-MIN_FRAMES_PER_CHUNK = 7  # Minimum frames before yielding (~300ms audio)
+CROSSFADE_SAMPLES = 1200  # 50ms crossfade at 24kHz (0.05 * 24000)
+MIN_FRAMES_PER_CHUNK = 7  # Minimum frames before yielding (~300ms of audio)
 
 
 class VLLMModelManager:
@@ -437,7 +437,7 @@ class VLLMModelManager:
         code_position = 0  # Position counter for token parsing
         last_decoded_frame = 0
         chunk_count = 0
-        crossfade_overlap: Optional[np.ndarray] = None  # Overlap buffer for crossfading
+        crossfade_overlap: Optional[np.ndarray] = None
         
         try:
             # Orpheus-3B prompt format: <|audio|>voice: text<|eot_id|>
@@ -484,10 +484,7 @@ class VLLMModelManager:
                             audio_bytes = await self._snac_decode_async(layer1, layer2, layer3)
                             
                             if audio_bytes:
-                                # Convert bytes to numpy array for crossfade processing
                                 audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-                                
-                                # Apply crossfade with previous chunk
                                 audio_to_yield, crossfade_overlap = self._apply_crossfade(
                                     crossfade_overlap, audio_array
                                 )
@@ -522,7 +519,7 @@ class VLLMModelManager:
             if crossfade_overlap is not None and len(crossfade_overlap) > 0:
                 yield crossfade_overlap.tobytes()
             
-            logger.info(f"[{request_id}] Generated {chunk_count} audio chunks with crossfades")
+            logger.info(f"[{request_id}] Generated {chunk_count} audio chunks")
             
         except Exception as e:
             logger.error(f"[{request_id}] Error generating speech: {e}")
