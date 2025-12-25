@@ -415,11 +415,14 @@ class VLLMModelManager:
         crossfade_overlap: Optional[np.ndarray] = None  # Overlap buffer for crossfading
         
         try:
+            # vLLM API compatibility: use text prompt (more compatible across versions)
+            voice_token = VOICE_TOKENS.get(voice.lower(), f"<|{voice}|>")
+            prompt_text = f"{voice_token}{prompt}<|audio|>"
+            
             async for output in self.engine.generate(
-                prompt=None,
+                prompt=prompt_text,
                 sampling_params=sampling_params,
                 request_id=request_id,
-                prompt_token_ids=prompt_token_ids,
             ):
                 if output.outputs:
                     out = output.outputs[0]
