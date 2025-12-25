@@ -119,35 +119,11 @@ class VLLMModelManager:
     
     def _find_audio_token_offset(self) -> int:
         """Find the starting token ID for audio tokens in the vocabulary."""
-        # Pattern 1: <custom_token_0> style (standard for Orpheus)
-        test_token = "<custom_token_0>"
-        token_id = self.tokenizer.convert_tokens_to_ids(test_token)
-        if token_id is not None and token_id != self.tokenizer.unk_token_id:
-            logger.info(f"Found audio offset from <custom_token_0>: {token_id}")
-            return token_id
-        
-        # Pattern 2: Try known Orpheus offsets in priority order
-        # 121416 is correct for most Orpheus-3B versions
-        known_offsets = [121416, 128009, 128266, 128256, 156939]
-        
-        for offset in known_offsets:
-            # Verify offset is within tokenizer range
-            if offset < len(self.tokenizer):
-                logger.info(f"Using known audio token offset: {offset}")
-                return offset
-        
-        # Pattern 3: Check for <|audio|> and use offset after it
-        audio_token = "<|audio|>"
-        audio_id = self.tokenizer.convert_tokens_to_ids(audio_token)
-        
-        if audio_id is not None and audio_id != self.tokenizer.unk_token_id:
-            # Audio tokens typically start after the <|audio|> token
-            logger.info(f"Found <|audio|> at {audio_id}, using offset {audio_id + 1}")
-            return audio_id + 1
-        
-        # Fallback
-        logger.warning(f"Could not detect audio token offset, using fallback 121416")
-        return 121416
+        # Orpheus-3B uses 121416 as the audio token offset
+        # This is where custom audio tokens start in the vocabulary
+        offset = 121416
+        logger.info(f"Using audio token offset: {offset}")
+        return offset
     
     def _format_prompt(self, text: str, voice: str) -> List[int]:
         """
