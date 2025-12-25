@@ -211,6 +211,11 @@ class VLLMModelManager:
         Redistribute SNAC codes into 3-layer format.
         
         Input codes should already be in 0-4095 range.
+        
+        Layer distribution (from Lex-au reference):
+        - layer1 (1 per frame): idx+0
+        - layer2 (2 per frame): idx+1, idx+4
+        - layer3 (4 per frame): idx+2, idx+3, idx+5, idx+6
         """
         num_frames = len(codes) // 7
         if num_frames == 0:
@@ -221,14 +226,20 @@ class VLLMModelManager:
         layer3 = []
         
         for i in range(num_frames):
-            base = i * 7
-            layer1.append(codes[base])
-            layer2.append(codes[base + 1])
-            layer2.append(codes[base + 2])
-            layer3.append(codes[base + 3])
-            layer3.append(codes[base + 4])
-            layer3.append(codes[base + 5])
-            layer3.append(codes[base + 6])
+            idx = i * 7
+            
+            # Layer 1: single value per frame
+            layer1.append(codes[idx])
+            
+            # Layer 2: two values per frame (positions 1 and 4)
+            layer2.append(codes[idx + 1])
+            layer2.append(codes[idx + 4])
+            
+            # Layer 3: four values per frame (positions 2, 3, 5, 6)
+            layer3.append(codes[idx + 2])
+            layer3.append(codes[idx + 3])
+            layer3.append(codes[idx + 5])
+            layer3.append(codes[idx + 6])
         
         return layer1, layer2, layer3
     
