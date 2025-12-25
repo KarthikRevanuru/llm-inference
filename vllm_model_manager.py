@@ -202,7 +202,11 @@ class VLLMModelManager:
         # Audio tokens must come in frames of 7
         num_frames = len(token_ids) // 7
         if num_frames == 0:
+            logger.debug(f"Not enough tokens for a frame: {len(token_ids)} tokens")
             return None, None, None
+        
+        # Debug: log first few token IDs to diagnose issues
+        logger.debug(f"Audio token offset: {offset}, first 14 tokens: {token_ids[:14]}")
             
         audio_codes = []
         for i in range(num_frames):
@@ -213,8 +217,7 @@ class VLLMModelManager:
                 
                 # Validation: if code is wildly out of range, then we aren't in audio mode
                 if not (0 <= code < 4096):
-                    logger.debug(f"Non-audio token detected: {tid} at pos {pos} (calc code: {code})")
-                    # Break generation if we encounter non-audio tokens in the middle
+                    logger.warning(f"Non-audio token: tid={tid}, pos={pos}, offset={offset}, code={code}")
                     return None, None, None
                 
                 audio_codes.append(code)
@@ -465,9 +468,12 @@ class VLLMModelManager:
             
             # Final decode: remaining frames
             available_frames = len(collected_tokens) // 7
+            logger.debug(f"[{request_id}] Final decode: {available_frames} frames, last_decoded={last_decoded_frame}")
             if available_frames > last_decoded_frame:
                 remaining_tokens = collected_tokens[last_decoded_frame * 7 : available_frames * 7]
+                logger.debug(f"[{request_id}] Decoding {len(remaining_tokens)} tokens")
                 final_audio = await self._tokens_to_audio_async(remaining_tokens)
+                logger.debug(f"[{request_id}] Final audio result: {len(final_audio) if final_audio else 'None'} bytes")
                 if final_audio:
                     audio_array = np.frombuffer(final_audio, dtype=np.int16)
                     audio_to_yield, crossfade_overlap = self._apply_crossfade(
