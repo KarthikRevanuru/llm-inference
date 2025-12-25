@@ -293,8 +293,15 @@ class VLLMModelManager:
                 with torch.no_grad():
                     audio = self.snac_model.decode(codes)
             
-            # Slice audio to remove startup artifacts (Lex-au approach)
-            audio_slice = audio[:, :, 2048:4096]
+            # For small chunks, use full audio; for large, slice to remove startup/end artifacts
+            audio_len = audio.shape[-1]
+            if audio_len > 4096:
+                # Large chunk: take middle portion (skip first 2048 samples of artifacts)
+                audio_slice = audio[:, :, 2048:]
+            else:
+                # Small chunk: use full audio
+                audio_slice = audio
+            
             audio_np = audio_slice.squeeze().cpu().numpy()
             audio_int16 = (audio_np * 32767).astype(np.int16)
             
@@ -343,9 +350,13 @@ class VLLMModelManager:
                 with torch.no_grad():
                     audio = self.snac_model.decode(codes)
             
-            # Slice audio to remove startup artifacts (Lex-au approach)
-            # SNAC decoder produces overlapping audio, we take only the "clean" middle portion
-            audio_slice = audio[:, :, 2048:4096]
+            # For small chunks, use full audio; for large, slice to remove startup artifacts
+            audio_len = audio.shape[-1]
+            if audio_len > 4096:
+                audio_slice = audio[:, :, 2048:]
+            else:
+                audio_slice = audio
+            
             audio_np = audio_slice.squeeze().cpu().numpy()
             audio_int16 = (audio_np * 32767).astype(np.int16)
             
