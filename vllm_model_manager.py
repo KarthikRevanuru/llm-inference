@@ -125,35 +125,7 @@ class VLLMModelManager:
         logger.info(f"Using audio token offset: {offset}")
         return offset
     
-    def _format_prompt(self, text: str, voice: str) -> List[int]:
-        """
-        Format text into token IDs for Orpheus-3B.
-        
-        Standard format: <|voice_token|>text<|audio|>
-        """
-        # Get voice token (e.g., <|tara|>)
-        voice_token = VOICE_TOKENS.get(voice.lower(), f"<|{voice}|>")
-        
-        # Check if voice token exists in tokenizer
-        voice_id = self.tokenizer.convert_tokens_to_ids(voice_token)
-        if voice_id == self.tokenizer.unk_token_id:
-            logger.warning(f"Voice token {voice_token} not found, using literal '{voice}:'")
-            prompt_text = f"{voice}: {text}<|audio|>"
-            return self.tokenizer.encode(prompt_text, add_special_tokens=True)
-        
-        # Build prompt: [VOICE_ID] + [TEXT_IDS] + [AUDIO_ID]
-        text_ids = self.tokenizer.encode(text, add_special_tokens=False)
-        audio_id = self.tokenizer.convert_tokens_to_ids("<|audio|>")
-        
-        if audio_id == self.tokenizer.unk_token_id:
-            # Fallback to observed ID for <|audio|> if not in tokenizer by name
-            audio_id = 128257 
-            
-        full_ids = [voice_id] + text_ids + [audio_id]
-        
-        logger.debug(f"Formatted prompt IDs: {full_ids}")
-        return full_ids
-    
+
     def _get_sampling_params(
         self,
         temperature: float,
@@ -452,8 +424,6 @@ class VLLMModelManager:
         if repetition_penalty < 1.1:
             repetition_penalty = 1.1
         
-        # Use token IDs directly to avoid re-tokenization issues in vLLM
-        prompt_token_ids = self._format_prompt(prompt, voice)
         sampling_params = self._get_sampling_params(temperature, top_p, repetition_penalty)
         
         # Thread-safe request counter increment
