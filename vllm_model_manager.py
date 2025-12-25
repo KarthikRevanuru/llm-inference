@@ -44,8 +44,7 @@ END_TOKEN = "<|eoa|>"
 
 # Audio settings
 SAMPLE_RATE = 24000
-CROSSFADE_SAMPLES = 1200  # 50ms crossfade at 24kHz (0.05 * 24000)
-MIN_FRAMES_PER_CHUNK = 7  # Minimum frames before yielding (~300ms of audio)
+MIN_FRAMES_PER_CHUNK = 1  # Minimum frames before yielding (~40ms audio) - optimized for low TTFB
 
 
 class VLLMModelManager:
@@ -363,49 +362,6 @@ class VLLMModelManager:
             self._snac_decode_in_stream, layer1, layer2, layer3, stream
         )
     
-    def _apply_crossfade(
-        self, 
-        prev_audio: Optional[np.ndarray], 
-        new_audio: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Apply crossfade between previous and new audio chunks.
-        
-        Returns:
-            Tuple of (audio_to_yield, overlap_for_next_chunk)
-        """
-        if prev_audio is None or len(prev_audio) == 0:
-            # First chunk: keep overlap at end for next crossfade
-            if len(new_audio) > CROSSFADE_SAMPLES:
-                audio_to_yield = new_audio[:-CROSSFADE_SAMPLES]
-                overlap = new_audio[-CROSSFADE_SAMPLES:]
-                return audio_to_yield, overlap
-            else:
-                return np.array([], dtype=np.int16), new_audio
-        
-        # Apply crossfade: fade out prev_audio, fade in new_audio
-        fade_out = np.linspace(1.0, 0.0, CROSSFADE_SAMPLES, dtype=np.float32)
-        fade_in = np.linspace(0.0, 1.0, CROSSFADE_SAMPLES, dtype=np.float32)
-        
-        # Blend the overlap region
-        prev_float = prev_audio.astype(np.float32)
-        new_start_float = new_audio[:CROSSFADE_SAMPLES].astype(np.float32)
-        
-        blended = (prev_float * fade_out + new_start_float * fade_in).astype(np.int16)
-        
-        # Combine: blended region + rest of new audio (minus overlap for next)
-        if len(new_audio) > CROSSFADE_SAMPLES * 2:
-            audio_to_yield = np.concatenate([blended, new_audio[CROSSFADE_SAMPLES:-CROSSFADE_SAMPLES]])
-            overlap = new_audio[-CROSSFADE_SAMPLES:]
-        elif len(new_audio) > CROSSFADE_SAMPLES:
-            audio_to_yield = blended
-            overlap = new_audio[CROSSFADE_SAMPLES:]
-        else:
-            audio_to_yield = blended
-            overlap = np.array([], dtype=np.int16)
-        
-        return audio_to_yield, overlap
-    
     async def generate_speech_stream(
         self,
         prompt: str,
@@ -437,7 +393,6 @@ class VLLMModelManager:
         code_position = 0  # Position counter for token parsing
         last_decoded_frame = 0
         chunk_count = 0
-        crossfade_overlap: Optional[np.ndarray] = None
         
         try:
             # Orpheus-3B prompt format: <|audio|>voice: text<|eot_id|>
@@ -484,14 +439,8 @@ class VLLMModelManager:
                             audio_bytes = await self._snac_decode_async(layer1, layer2, layer3)
                             
                             if audio_bytes:
-                                audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-                                audio_to_yield, crossfade_overlap = self._apply_crossfade(
-                                    crossfade_overlap, audio_array
-                                )
-                                
-                                if len(audio_to_yield) > 0:
-                                    chunk_count += 1
-                                    yield audio_to_yield.tobytes()
+                                chunk_count += 1
+                                yield audio_bytes
                         
                         last_decoded_frame = available_frames
             
@@ -507,17 +456,8 @@ class VLLMModelManager:
                 if layer1 is not None:
                     final_audio = await self._snac_decode_async(layer1, layer2, layer3)
                     if final_audio:
-                        audio_array = np.frombuffer(final_audio, dtype=np.int16)
-                        audio_to_yield, crossfade_overlap = self._apply_crossfade(
-                            crossfade_overlap, audio_array
-                        )
-                        if len(audio_to_yield) > 0:
-                            chunk_count += 1
-                            yield audio_to_yield.tobytes()
-            
-            # Yield any remaining crossfade overlap
-            if crossfade_overlap is not None and len(crossfade_overlap) > 0:
-                yield crossfade_overlap.tobytes()
+                        chunk_count += 1
+                        yield final_audio
             
             logger.info(f"[{request_id}] Generated {chunk_count} audio chunks")
             
