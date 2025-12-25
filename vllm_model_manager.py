@@ -123,25 +123,27 @@ class VLLMModelManager:
         test_token = "<custom_token_0>"
         token_id = self.tokenizer.convert_tokens_to_ids(test_token)
         if token_id is not None and token_id != self.tokenizer.unk_token_id:
+            logger.info(f"Found audio offset from <custom_token_0>: {token_id}")
             return token_id
         
-        # Pattern 2: Check for <|audio|> which is also a common marker
+        # Pattern 2: Try known Orpheus offsets in priority order
+        # 121416 is correct for most Orpheus-3B versions
+        known_offsets = [121416, 128009, 128266, 128256, 156939]
+        
+        for offset in known_offsets:
+            # Verify offset is within tokenizer range
+            if offset < len(self.tokenizer):
+                logger.info(f"Using known audio token offset: {offset}")
+                return offset
+        
+        # Pattern 3: Check for <|audio|> and use offset after it
         audio_token = "<|audio|>"
         audio_id = self.tokenizer.convert_tokens_to_ids(audio_token)
         
-        # Many versions of Orpheus start audio tokens immediately after <|audio|>
-        # or at specific hardcoded offsets like 121416
-        known_offsets = [121416, 128266, 128256, 156939]
-        
         if audio_id is not None and audio_id != self.tokenizer.unk_token_id:
-            # Check if tokens immediately after <|audio|> look like audio tokens
-            # (they won't be in the standard tokenizer vocabulary or will be special)
-            if audio_id + 1 < len(self.tokenizer):
-                return audio_id + 1
-
-        for offset in known_offsets:
-            if offset < len(self.tokenizer):
-                return offset
+            # Audio tokens typically start after the <|audio|> token
+            logger.info(f"Found <|audio|> at {audio_id}, using offset {audio_id + 1}")
+            return audio_id + 1
         
         # Fallback
         logger.warning(f"Could not detect audio token offset, using fallback 121416")
