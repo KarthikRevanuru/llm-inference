@@ -396,10 +396,10 @@ class VLLMModelManager:
         crossfade_overlap: Optional[np.ndarray] = None  # Overlap buffer for crossfading
         
         try:
-            # Orpheus-3B finetuned model uses simple format: "voice: text"
-            # No special tokens like <|audio|> needed
-            prompt_text = f"{voice}: {prompt}"
-            logger.debug(f"[{request_id}] Prompt: {prompt_text}")
+            # Orpheus-3B prompt format: <|audio|>voice: text<|eot_id|>
+            # Based on Lex-au/Orpheus-FastAPI reference implementation
+            prompt_text = f"<|audio|>{voice}: {prompt}<|eot_id|>"
+            logger.info(f"[{request_id}] Prompt: {prompt_text}")
             
             async for output in self.engine.generate(
                 prompt=prompt_text,
