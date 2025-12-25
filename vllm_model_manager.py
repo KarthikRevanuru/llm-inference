@@ -366,22 +366,28 @@ class VLLMModelManager:
     def _apply_crossfade(
         self, 
         prev_audio: Optional[np.ndarray], 
-        new_audio: np.ndarray
+        new_audio: np.ndarray,
+        is_final: bool = False
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Apply crossfade between previous and new audio chunks.
+        
+        Args:
+            prev_audio: Previous chunk's overlap region
+            new_audio: New audio to process
+            is_final: If True, don't hold back overlap (last chunk)
         
         Returns:
             Tuple of (audio_to_yield, overlap_for_next_chunk)
         """
         if prev_audio is None or len(prev_audio) == 0:
-            # First chunk: keep overlap at end for next crossfade
-            if len(new_audio) > CROSSFADE_SAMPLES:
+            # First chunk: keep overlap at end for next crossfade (unless final)
+            if not is_final and len(new_audio) > CROSSFADE_SAMPLES:
                 audio_to_yield = new_audio[:-CROSSFADE_SAMPLES]
                 overlap = new_audio[-CROSSFADE_SAMPLES:]
                 return audio_to_yield, overlap
             else:
-                return np.array([], dtype=np.int16), new_audio
+                return new_audio, np.array([], dtype=np.int16)
         
         # Apply crossfade: fade out prev_audio, fade in new_audio
         fade_out = np.linspace(1.0, 0.0, CROSSFADE_SAMPLES, dtype=np.float32)
@@ -393,8 +399,12 @@ class VLLMModelManager:
         
         blended = (prev_float * fade_out + new_start_float * fade_in).astype(np.int16)
         
-        # Combine: blended region + rest of new audio (minus overlap for next)
-        if len(new_audio) > CROSSFADE_SAMPLES * 2:
+        # Combine: blended region + rest of new audio (minus overlap for next if not final)
+        if is_final:
+            # Final chunk: yield everything, no overlap needed
+            audio_to_yield = np.concatenate([blended, new_audio[CROSSFADE_SAMPLES:]])
+            return audio_to_yield, np.array([], dtype=np.int16)
+        elif len(new_audio) > CROSSFADE_SAMPLES * 2:
             audio_to_yield = np.concatenate([blended, new_audio[CROSSFADE_SAMPLES:-CROSSFADE_SAMPLES]])
             overlap = new_audio[-CROSSFADE_SAMPLES:]
         elif len(new_audio) > CROSSFADE_SAMPLES:
@@ -508,14 +518,15 @@ class VLLMModelManager:
                     final_audio = await self._snac_decode_async(layer1, layer2, layer3)
                     if final_audio:
                         audio_array = np.frombuffer(final_audio, dtype=np.int16)
+                        # Use is_final=True to not hold back samples
                         audio_to_yield, crossfade_overlap = self._apply_crossfade(
-                            crossfade_overlap, audio_array
+                            crossfade_overlap, audio_array, is_final=True
                         )
                         if len(audio_to_yield) > 0:
                             chunk_count += 1
                             yield audio_to_yield.tobytes()
             
-            # Yield any remaining crossfade overlap
+            # Yield any remaining crossfade overlap (in case final decode didn't happen)
             if crossfade_overlap is not None and len(crossfade_overlap) > 0:
                 yield crossfade_overlap.tobytes()
             
