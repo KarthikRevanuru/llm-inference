@@ -428,6 +428,11 @@ class VLLMModelManager:
                         if code is not None and 0 <= code < 4096:
                             collected_codes.append(code)
                             code_position += 1
+                        else:
+                            # Debug: log first few unmatched tokens
+                            if len(collected_codes) < 3 and code_position < 10:
+                                token_text = self.tokenizer.decode([tid])
+                                logger.debug(f"[{request_id}] Token {tid} -> '{token_text}' (code={code})")
                     
                     # Check if we have enough for audio generation
                     available_frames = len(collected_codes) // 7
