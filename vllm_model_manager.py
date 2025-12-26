@@ -94,6 +94,10 @@ class VLLMModelManager:
         
         if torch.cuda.is_available():
             self.snac_model = self.snac_model.cuda()
+            snac_device = next(self.snac_model.parameters()).device
+            logger.info(f"SNAC decoder device: {snac_device}")
+        else:
+            logger.warning("CUDA not available - SNAC running on CPU (will be slow!)")
         
         # Find audio token offset by checking for custom audio tokens
         # Orpheus adds tokens like <custom_token_0> through <custom_token_4095>
@@ -115,7 +119,15 @@ class VLLMModelManager:
         
         self._initialized = True
         
-        logger.info("vLLM model manager initialized successfully")
+        # Log GPU status summary
+        if torch.cuda.is_available():
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_mem = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            logger.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GB)")
+            logger.info(f"vLLM engine: GPU (tensor_parallel={settings.tensor_parallel_size})")
+        else:
+            logger.warning("No GPU detected - running on CPU")
+        
         logger.info(f"Max concurrent sequences: {settings.max_num_seqs}")
     
     def _find_audio_token_offset(self) -> int:
