@@ -26,8 +26,8 @@ class Settings:
         self.gpu_memory_utilization: float = self._getfloat("model", "gpu_memory_utilization", 0.80)
         
         # vLLM Batching Configuration
-        self.max_num_seqs: int = self._getint("batching", "max_num_seqs", 4)
-        self.max_batch_size: int = self._getint("batching", "max_batch_size", 4)
+        self.max_num_seqs: int = self._getint("batching", "max_num_seqs", 8)
+        self.max_batch_size: int = self._getint("batching", "max_batch_size", 8)
         
         # Server Configuration
         self.host: str = self._get("server", "host", "0.0.0.0")

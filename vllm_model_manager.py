@@ -80,10 +80,11 @@ class VLLMModelManager:
         engine_args = AsyncEngineArgs(
             model=settings.model_name,
             max_model_len=settings.max_model_len,
-            gpu_memory_utilization=settings.gpu_memory_utilization,
+            gpu_memory_utilization=0.90,  # Use more VRAM on A40
             max_num_seqs=settings.max_num_seqs,
             tensor_parallel_size=settings.tensor_parallel_size,
-            enforce_eager=True,
+            enforce_eager=False,  # Enable CUDA graphs for better throughput
+            dtype="bfloat16",  # A40 supports bf16 natively
         )
         
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
