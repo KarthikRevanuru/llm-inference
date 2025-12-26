@@ -159,22 +159,22 @@ class VLLMModelManager:
         """
         Convert token ID directly to SNAC code without tokenizer.decode().
         
-        Audio tokens are in range [audio_token_offset, audio_token_offset + 28672).
-        The custom_token_N value is: token_id - audio_token_offset + 10.
-        Formula: code = (token_id - audio_token_offset + 10) - 10 - ((position % 7) * 4096)
-                      = token_id - audio_token_offset - ((position % 7) * 4096)
+        Based on Maya-1-Voice reference implementation:
+        CODE_TOKEN_OFFSET = 128266  # Start of SNAC codes
+        code = (token_id - CODE_TOKEN_OFFSET) % 4096
         
         This avoids CPU-bound tokenizer.decode() calls in the hot path.
         """
-        # Check if token is in audio range (28672 = 7 * 4096 audio tokens)
-        relative_id = token_id - self.audio_token_offset
-        if relative_id < 0 or relative_id >= 28672:
+        # Constants from Maya-1-Voice reference
+        CODE_TOKEN_OFFSET = 128266  # Start of SNAC codes
+        SNAC_MAX_ID = 156937        # 128266 + (7 * 4096) - 1
+        
+        # Check if this is a SNAC token
+        if token_id < CODE_TOKEN_OFFSET or token_id > SNAC_MAX_ID:
             return None
         
-        # Direct formula without string parsing
-        # token_id maps to custom_token_(relative_id + 10)
-        # code = (relative_id + 10) - 10 - ((position % 7) * 4096)
-        code = relative_id - ((position % 7) * 4096)
+        # Simple formula: mod 4096 handles layer cycling automatically
+        code = (token_id - CODE_TOKEN_OFFSET) % 4096
         
         return code
     
