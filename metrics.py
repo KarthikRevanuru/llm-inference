@@ -41,6 +41,25 @@ active_requests = Gauge(
     'Number of currently active requests'
 )
 
+# Performance instrumentation metrics
+tokens_per_second = Histogram(
+    'tts_tokens_per_second',
+    'Token generation rate (tokens/second)',
+    buckets=[50, 100, 200, 300, 400, 500, 750, 1000]
+)
+
+snac_decode_seconds = Histogram(
+    'tts_snac_decode_seconds',
+    'SNAC decode latency per chunk (seconds)',
+    buckets=[0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.2]
+)
+
+time_to_first_audio = Histogram(
+    'tts_time_to_first_audio_seconds',
+    'Time from request start to first audio chunk (seconds)',
+    buckets=[0.1, 0.2, 0.3, 0.5, 0.75, 1.0, 1.5, 2.0]
+)
+
 # GPU metrics
 gpu_memory_used = Gauge(
     'tts_gpu_memory_bytes',

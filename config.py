@@ -23,11 +23,11 @@ class Settings:
         self.model_name: str = self._get("model", "name", "canopylabs/orpheus-3b-0.1-ft")
         self.max_model_len: int = self._getint("model", "max_model_len", 2048)
         self.tensor_parallel_size: int = self._getint("model", "tensor_parallel_size", 1)
-        self.gpu_memory_utilization: float = self._getfloat("model", "gpu_memory_utilization", 0.90)
+        self.gpu_memory_utilization: float = self._getfloat("model", "gpu_memory_utilization", 0.80)
         
         # vLLM Batching Configuration
-        self.max_num_seqs: int = self._getint("batching", "max_num_seqs", 8)
-        self.max_batch_size: int = self._getint("batching", "max_batch_size", 8)
+        self.max_num_seqs: int = self._getint("batching", "max_num_seqs", 4)
+        self.max_batch_size: int = self._getint("batching", "max_batch_size", 4)
         
         # Server Configuration
         self.host: str = self._get("server", "host", "0.0.0.0")

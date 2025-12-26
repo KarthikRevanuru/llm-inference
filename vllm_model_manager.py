@@ -12,6 +12,7 @@ CUDA Streams Optimization:
 import asyncio
 import logging
 import threading
+import time
 import torch
 import numpy as np
 from typing import AsyncIterator, List, Optional, Tuple
@@ -215,36 +216,6 @@ class VLLMModelManager:
         
         return layer1, layer2, layer3
     
-    def _tokens_to_audio(self, token_ids: List[int]) -> Optional[bytes]:
-        """Convert Orpheus audio tokens to PCM audio using SNAC decoder (sync version)."""
-        if len(token_ids) < 7:
-            return None
-        
-        layer1, layer2, layer3 = self._redistribute_codes(token_ids)
-        
-        if layer1 is None:
-            return None
-        
-        try:
-            device = next(self.snac_model.parameters()).device
-            codes = [
-                torch.tensor([layer1], dtype=torch.long, device=device),
-                torch.tensor([layer2], dtype=torch.long, device=device),
-                torch.tensor([layer3], dtype=torch.long, device=device),
-            ]
-            
-            with torch.no_grad():
-                audio = self.snac_model.decode(codes)
-            
-            audio_np = audio.squeeze().cpu().numpy()
-            audio_int16 = (audio_np * 32767).astype(np.int16)
-            
-            return audio_int16.tobytes()
-            
-        except Exception as e:
-            logger.warning(f"SNAC decode error: {e}")
-            return None
-    
     def _get_next_stream(self) -> Optional[torch.cuda.Stream]:
         """Get the next CUDA stream in round-robin fashion (thread-safe)."""
         if not self._cuda_streams:
@@ -254,68 +225,6 @@ class VLLMModelManager:
             stream = self._cuda_streams[self._stream_idx]
             self._stream_idx = (self._stream_idx + 1) % len(self._cuda_streams)
             return stream
-    
-    def _tokens_to_audio_in_stream(
-        self, 
-        token_ids: List[int], 
-        stream: Optional[torch.cuda.Stream]
-    ) -> Optional[bytes]:
-        """
-        Convert tokens to audio using a specific CUDA stream.
-        
-        This method is designed to be called from asyncio.to_thread() to avoid
-        blocking the async event loop while enabling parallel SNAC decoding.
-        """
-        if len(token_ids) < 7:
-            return None
-        
-        layer1, layer2, layer3 = self._redistribute_codes(token_ids)
-        
-        if layer1 is None:
-            return None
-        
-        try:
-            device = next(self.snac_model.parameters()).device
-            codes = [
-                torch.tensor([layer1], dtype=torch.long, device=device),
-                torch.tensor([layer2], dtype=torch.long, device=device),
-                torch.tensor([layer3], dtype=torch.long, device=device),
-            ]
-            
-            # Use CUDA stream for parallel execution
-            if stream is not None:
-                with torch.cuda.stream(stream):
-                    with torch.no_grad():
-                        audio = self.snac_model.decode(codes)
-                # Wait for this stream to complete
-                stream.synchronize()
-            else:
-                # Fallback: no CUDA streams available
-                with torch.no_grad():
-                    audio = self.snac_model.decode(codes)
-            
-            audio_np = audio.squeeze().cpu().numpy()
-            audio_int16 = (audio_np * 32767).astype(np.int16)
-            
-            return audio_int16.tobytes()
-            
-        except Exception as e:
-            logger.warning(f"SNAC decode error in stream: {e}")
-            return None
-    
-    async def _tokens_to_audio_async(self, token_ids: List[int]) -> Optional[bytes]:
-        """
-        Async-compatible audio conversion with CUDA streams.
-        
-        Uses asyncio.to_thread() to run SNAC decode in a thread pool,
-        preventing blocking of the async event loop. Combined with CUDA
-        streams, this enables truly parallel audio decoding for multiple
-        concurrent requests.
-        """
-        stream = self._get_next_stream()
-        return await asyncio.to_thread(
-            self._tokens_to_audio_in_stream, token_ids, stream
-        )
     
     def _snac_decode_in_stream(
         self,
@@ -430,6 +339,8 @@ class VLLMModelManager:
         Uses incremental SNAC decoding with crossfades for efficient streaming:
         - Only decodes new frames (not all accumulated tokens)
         - Applies 50ms crossfade between chunks to prevent audio artifacts
+        
+        Performance metrics are logged at the end of each request.
         """
         if repetition_penalty < 1.1:
             repetition_penalty = 1.1
@@ -442,6 +353,12 @@ class VLLMModelManager:
             request_id = f"tts-{self._request_counter}"
         
         logger.info(f"[{request_id}] Starting generation for prompt (length: {len(prompt)})")
+        
+        # Performance tracking
+        request_start_time = time.perf_counter()
+        first_audio_time: Optional[float] = None
+        total_tokens = 0
+        snac_decode_times: list[float] = []
         
         collected_codes: List[int] = []  # SNAC codes (0-4095)
         code_position = 0  # Position counter for token parsing
@@ -462,6 +379,7 @@ class VLLMModelManager:
                 if output.outputs:
                     out = output.outputs[0]
                     new_token_ids = out.token_ids
+                    total_tokens = len(new_token_ids)
                     
                     # Process new tokens: decode to text and parse
                     start_idx = len(collected_codes)  # How many we've already processed
@@ -491,7 +409,11 @@ class VLLMModelManager:
                         layer1, layer2, layer3 = self._redistribute_codes(new_codes)
                         
                         if layer1 is not None:
+                            # Time SNAC decode
+                            snac_start = time.perf_counter()
                             audio_bytes = await self._snac_decode_async(layer1, layer2, layer3)
+                            snac_elapsed = time.perf_counter() - snac_start
+                            snac_decode_times.append(snac_elapsed)
                             
                             if audio_bytes:
                                 audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
@@ -500,6 +422,12 @@ class VLLMModelManager:
                                 )
                                 
                                 if len(audio_to_yield) > 0:
+                                    # Record time to first audio
+                                    if first_audio_time is None:
+                                        first_audio_time = time.perf_counter()
+                                        ttfa = first_audio_time - request_start_time
+                                        logger.info(f"[{request_id}] TTFA: {ttfa*1000:.1f}ms")
+                                    
                                     chunk_count += 1
                                     yield audio_to_yield.tobytes()
                         
@@ -515,7 +443,11 @@ class VLLMModelManager:
                 layer1, layer2, layer3 = self._redistribute_codes(remaining_codes)
                 
                 if layer1 is not None:
+                    snac_start = time.perf_counter()
                     final_audio = await self._snac_decode_async(layer1, layer2, layer3)
+                    snac_elapsed = time.perf_counter() - snac_start
+                    snac_decode_times.append(snac_elapsed)
+                    
                     if final_audio:
                         audio_array = np.frombuffer(final_audio, dtype=np.int16)
                         # Use is_final=True to not hold back samples
@@ -523,6 +455,8 @@ class VLLMModelManager:
                             crossfade_overlap, audio_array, is_final=True
                         )
                         if len(audio_to_yield) > 0:
+                            if first_audio_time is None:
+                                first_audio_time = time.perf_counter()
                             chunk_count += 1
                             yield audio_to_yield.tobytes()
             
@@ -530,6 +464,17 @@ class VLLMModelManager:
             if crossfade_overlap is not None and len(crossfade_overlap) > 0:
                 yield crossfade_overlap.tobytes()
             
+            # Performance summary
+            total_time = time.perf_counter() - request_start_time
+            tokens_per_sec = total_tokens / total_time if total_time > 0 else 0
+            ttfa_ms = (first_audio_time - request_start_time) * 1000 if first_audio_time else 0
+            avg_snac_ms = (sum(snac_decode_times) / len(snac_decode_times) * 1000) if snac_decode_times else 0
+            
+            logger.info(
+                f"[{request_id}] PERF: {total_tokens} tokens in {total_time:.2f}s "
+                f"({tokens_per_sec:.0f} tok/s), TTFA: {ttfa_ms:.0f}ms, "
+                f"SNAC: {len(snac_decode_times)} calls avg {avg_snac_ms:.1f}ms"
+            )
             logger.info(f"[{request_id}] Generated {chunk_count} audio chunks")
             
         except Exception as e:
