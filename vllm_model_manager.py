@@ -155,6 +155,29 @@ class VLLMModelManager:
             max_tokens=4096,
         )
     
+    def _token_id_to_code(self, token_id: int, position: int) -> Optional[int]:
+        """
+        Convert token ID directly to SNAC code without tokenizer.decode().
+        
+        Audio tokens are in range [audio_token_offset, audio_token_offset + 28672).
+        The custom_token_N value is: token_id - audio_token_offset + 10.
+        Formula: code = (token_id - audio_token_offset + 10) - 10 - ((position % 7) * 4096)
+                      = token_id - audio_token_offset - ((position % 7) * 4096)
+        
+        This avoids CPU-bound tokenizer.decode() calls in the hot path.
+        """
+        # Check if token is in audio range (28672 = 7 * 4096 audio tokens)
+        relative_id = token_id - self.audio_token_offset
+        if relative_id < 0 or relative_id >= 28672:
+            return None
+        
+        # Direct formula without string parsing
+        # token_id maps to custom_token_(relative_id + 10)
+        # code = (relative_id + 10) - 10 - ((position % 7) * 4096)
+        code = relative_id - ((position % 7) * 4096)
+        
+        return code
+    
     def _parse_custom_token(self, token_text: str, position: int) -> Optional[int]:
         """
         Parse a custom token string and convert to SNAC code.
@@ -163,6 +186,7 @@ class VLLMModelManager:
         Formula: code = N - 10 - ((position % 7) * 4096)
         
         Based on Lex-au/Orpheus-FastAPI implementation.
+        DEPRECATED: Use _token_id_to_code() for better performance.
         """
         CUSTOM_TOKEN_PREFIX = "<custom_token_"
         
@@ -394,23 +418,16 @@ class VLLMModelManager:
                     new_token_ids = out.token_ids
                     total_tokens = len(new_token_ids)
                     
-                    # Process new tokens: decode to text and parse
+                    # Process new tokens: convert directly to SNAC codes (no tokenizer.decode())
                     start_idx = len(collected_codes)  # How many we've already processed
                     
                     for tid in new_token_ids[start_idx:]:
-                        # Decode token ID to text
-                        token_text = self.tokenizer.decode([tid])
-                        
-                        # Parse custom token to get SNAC code
-                        code = self._parse_custom_token(token_text, code_position)
+                        # Direct token ID to SNAC code conversion (optimized)
+                        code = self._token_id_to_code(tid, code_position)
                         
                         if code is not None and 0 <= code < 4096:
                             collected_codes.append(code)
                             code_position += 1
-                        elif code is not None:
-                            # Log invalid codes for debugging
-                            if len(collected_codes) < 5:
-                                logger.debug(f"[{request_id}] Invalid code {code} from token '{token_text}'")
                     
                     # Check if we have enough for audio generation
                     available_frames = len(collected_codes) // 7
