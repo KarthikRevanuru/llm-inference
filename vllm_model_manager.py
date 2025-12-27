@@ -46,7 +46,7 @@ END_TOKEN = "<|eoa|>"
 # Audio settings
 SAMPLE_RATE = 24000
 CROSSFADE_SAMPLES = 1200  # 50ms crossfade at 24kHz (0.05 * 24000)
-MIN_FRAMES_PER_CHUNK = 7  # Minimum frames before yielding (~300ms of audio)
+MIN_FRAMES_PER_CHUNK = 4  # Reduced from 7 to yield audio faster/more often
 
 
 class VLLMModelManager:
@@ -87,7 +87,7 @@ class VLLMModelManager:
             dtype="bfloat16",  # A40 supports bf16 natively
             enable_prefix_caching=True,  # Speed up TTFT for repeated patterns
             block_size=16,  # Smaller blocks for better latency
-            num_scheduler_steps=10,  # Multi-step scheduling to reduce CPU overhead
+            num_scheduler_steps=15,  # Increased to 15 to further drop CPU overhead
         )
         
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
