@@ -110,6 +110,15 @@ class VLLMModelManager:
         
         if torch.cuda.is_available():
             self.snac_model = self.snac_model.cuda()
+            
+            # Apply torch.compile to reduce SNAC decode overhead
+            try:
+                logger.info("Applying torch.compile to SNAC decoder...")
+                self.snac_model = torch.compile(self.snac_model, mode="reduce-overhead")
+                logger.info("torch.compile applied successfully")
+            except Exception as e:
+                logger.warning(f"Failed to apply torch.compile: {e}. Falling back to eager mode.")
+            
             snac_device = next(self.snac_model.parameters()).device
             logger.info(f"SNAC decoder device: {snac_device}")
         else:
