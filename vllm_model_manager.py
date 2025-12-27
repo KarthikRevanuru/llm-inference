@@ -90,21 +90,26 @@ class VLLMModelManager:
         
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         
+        # Build token ID mapping at startup (high-performance lookup)
+        logger.info("Building token ID mapping from tokenizer vocabulary...")
+        self._token_id_to_num = {}
+        vocab = self.tokenizer.get_vocab()
+        CUSTOM_TOKEN_PREFIX = "<custom_token_"
+        for token_text, tid in vocab.items():
+            if token_text.startswith(CUSTOM_TOKEN_PREFIX) and token_text.endswith(">"):
+                try:
+                    num = int(token_text[14:-1])
+                    self._token_id_to_num[tid] = num
+                except ValueError:
+                    continue
+        logger.info(f"Mapped {len(self._token_id_to_num)} custom tokens")
+        
         # Initialize SNAC decoder
         logger.info("Loading SNAC audio decoder...")
         self.snac_model = snac.SNAC.from_pretrained("hubertsiuzdak/snac_24khz").eval()
         
         if torch.cuda.is_available():
             self.snac_model = self.snac_model.cuda()
-            
-            # Apply torch.compile to reduce SNAC decode overhead
-            try:
-                logger.info("Applying torch.compile to SNAC decoder...")
-                self.snac_model = torch.compile(self.snac_model, mode="reduce-overhead")
-                logger.info("torch.compile applied successfully")
-            except Exception as e:
-                logger.warning(f"Failed to apply torch.compile: {e}. Falling back to eager mode.")
-            
             snac_device = next(self.snac_model.parameters()).device
             logger.info(f"SNAC decoder device: {snac_device}")
         else:
@@ -147,8 +152,16 @@ class VLLMModelManager:
         # This is where custom audio tokens start in the vocabulary
         offset = 121416
         logger.info(f"Using audio token offset: {offset}")
-        return offset
-    
+    async def warmup(self):
+        """Warm up the engine and decoder to reduce TTFA on first real request."""
+        logger.info("Warming up TTS engine...")
+        try:
+            # Short dummy generation
+            async for _ in self.generate_speech_stream("Warm up", voice="tara"):
+                pass
+            logger.info("Warmup complete")
+        except Exception as e:
+            logger.warning(f"Warmup failed: {e}")
 
     def _get_sampling_params(
         self,
@@ -431,19 +444,20 @@ class VLLMModelManager:
                     new_token_ids = out.token_ids
                     total_tokens = len(new_token_ids)
                     
-                    # Process new tokens: decode to text and parse
-                    start_idx = len(collected_codes)  # How many we've already processed
+                    # Process new tokens: look up in pre-built map (fastest)
+                    start_idx = len(collected_codes)
                     
                     for tid in new_token_ids[start_idx:]:
-                        # Decode token ID to text
-                        token_text = self.tokenizer.decode([tid])
+                        # Check pre-built token ID to num mapping
+                        token_num = self._token_id_to_num.get(tid)
                         
-                        # Parse custom token to get SNAC code
-                        code = self._parse_custom_token(token_text, code_position)
-                        
-                        if code is not None and 0 <= code < 4096:
-                            collected_codes.append(code)
-                            code_position += 1
+                        if token_num is not None:
+                            # Apply formula: code = N - 10 - ((pos % 7) * 4096)
+                            code = token_num - 10 - ((code_position % 7) * 4096)
+                            
+                            if 0 <= code < 4096:
+                                collected_codes.append(code)
+                                code_position += 1
                     
                     # Check if we have enough for audio generation
                     available_frames = len(collected_codes) // 7

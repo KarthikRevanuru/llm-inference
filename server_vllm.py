@@ -52,6 +52,9 @@ async def lifespan(app: FastAPI):
     if not model_manager.is_ready():
         raise RuntimeError("Model failed to initialize")
     
+    # Warm up the engine
+    await model_manager.warmup()
+    
     logger.info("Server ready to accept requests (vLLM direct mode - true concurrency enabled)")
     
     yield
@@ -194,18 +197,19 @@ async def stream_tts(request: TTSRequest):
                 }
             
             # Send completion event
+            import json
             duration = total_bytes / (settings.sample_rate * settings.sample_width)
             generation_time = time.time() - start_time
             rtf = duration / generation_time if generation_time > 0 else 0
             
             yield {
                 "event": "complete",
-                "data": {
-                    "audio_duration_seconds": duration,
-                    "generation_time_seconds": generation_time,
-                    "realtime_factor": rtf,
-                    "total_chunks": chunk_count
-                }
+                "data": json.dumps({
+                    "audio_duration_seconds": float(duration),
+                    "generation_time_seconds": float(generation_time),
+                    "realtime_factor": float(rtf),
+                    "total_chunks": int(chunk_count)
+                })
             }
             
             # Record metrics
