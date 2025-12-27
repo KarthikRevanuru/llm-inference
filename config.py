@@ -48,8 +48,8 @@ class Settings:
         ]
         
         # Generation parameters
-        self.default_temperature: float = self._getfloat("generation", "default_temperature", 1.0)
-        self.default_top_p: float = self._getfloat("generation", "default_top_p", 0.95)
+        self.default_temperature: float = self._getfloat("generation", "default_temperature", 0.4)
+        self.default_top_p: float = self._getfloat("generation", "default_top_p", 0.9)
         self.default_repetition_penalty: float = self._getfloat("generation", "default_repetition_penalty", 1.1)
         
         # Request limits

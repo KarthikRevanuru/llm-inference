@@ -369,8 +369,8 @@ class VLLMModelManager:
         self,
         prompt: str,
         voice: str = "tara",
-        temperature: float = 1.0,
-        top_p: float = 0.95,
+        temperature: float = 0.4,
+        top_p: float = 0.9,
         repetition_penalty: float = 1.1,
     ) -> AsyncIterator[bytes]:
         """
