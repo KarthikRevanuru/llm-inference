@@ -80,12 +80,13 @@ class VLLMModelManager:
         engine_args = AsyncEngineArgs(
             model=settings.model_name,
             max_model_len=settings.max_model_len,
-            gpu_memory_utilization=0.90,  # Use more VRAM on A40
+            gpu_memory_utilization=0.95,  # Maximize VRAM on A40
             max_num_seqs=settings.max_num_seqs,
             tensor_parallel_size=settings.tensor_parallel_size,
             enforce_eager=False,  # Enable CUDA graphs for better throughput
             dtype="bfloat16",  # A40 supports bf16 natively
             enable_prefix_caching=True,  # Speed up TTFT for repeated patterns
+            block_size=16,  # Smaller blocks for better latency on short sequences
         )
         
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
@@ -110,15 +111,6 @@ class VLLMModelManager:
         
         if torch.cuda.is_available():
             self.snac_model = self.snac_model.cuda()
-            
-            # Apply torch.compile to reduce SNAC decode overhead
-            try:
-                logger.info("Applying torch.compile to SNAC decoder...")
-                self.snac_model = torch.compile(self.snac_model, mode="reduce-overhead")
-                logger.info("torch.compile applied successfully")
-            except Exception as e:
-                logger.warning(f"Failed to apply torch.compile: {e}. Falling back to eager mode.")
-            
             snac_device = next(self.snac_model.parameters()).device
             logger.info(f"SNAC decoder device: {snac_device}")
         else:
