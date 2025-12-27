@@ -421,21 +421,19 @@ class VLLMModelManager:
                     new_token_ids = out.token_ids
                     total_tokens = len(new_token_ids)
                     
-                    # Process new tokens: convert directly to SNAC codes (no tokenizer.decode())
+                    # Process new tokens: decode to text and parse
                     start_idx = len(collected_codes)  # How many we've already processed
                     
                     for tid in new_token_ids[start_idx:]:
-                        # Direct token ID to SNAC code conversion (optimized)
-                        code = self._token_id_to_code(tid, code_position)
+                        # Decode token ID to text
+                        token_text = self.tokenizer.decode([tid])
+                        
+                        # Parse custom token to get SNAC code
+                        code = self._parse_custom_token(token_text, code_position)
                         
                         if code is not None and 0 <= code < 4096:
                             collected_codes.append(code)
                             code_position += 1
-                        else:
-                            # Debug: log first few unmatched tokens
-                            if len(collected_codes) < 3 and code_position < 10:
-                                token_text = self.tokenizer.decode([tid])
-                                logger.debug(f"[{request_id}] Token {tid} -> '{token_text}' (code={code})")
                     
                     # Check if we have enough for audio generation
                     available_frames = len(collected_codes) // 7
