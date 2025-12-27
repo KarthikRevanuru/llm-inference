@@ -147,25 +147,28 @@ class VLLMModelManager:
         repetition_penalty: float,
     ) -> SamplingParams:
         """Create vLLM sampling parameters."""
-        # Use a higher max_tokens for audio generation
+        # Audio control tokens (from Maya-1-Voice reference)
+        CODE_END_TOKEN_ID = 128258  # End of Speech - stop generation here
+        
         return SamplingParams(
             temperature=temperature,
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             max_tokens=4096,
+            stop_token_ids=[CODE_END_TOKEN_ID],  # Stop when audio ends
         )
     
     def _token_id_to_code(self, token_id: int, position: int) -> Optional[int]:
         """
         Convert token ID directly to SNAC code without tokenizer.decode().
         
-        Based on Maya-1-Voice reference implementation:
+        Based on reference implementation:
         CODE_TOKEN_OFFSET = 128266  # Start of SNAC codes
         code = (token_id - CODE_TOKEN_OFFSET) % 4096
         
         This avoids CPU-bound tokenizer.decode() calls in the hot path.
         """
-        # Constants from Maya-1-Voice reference
+        # Constants from reference
         CODE_TOKEN_OFFSET = 128266  # Start of SNAC codes
         SNAC_MAX_ID = 156937        # 128266 + (7 * 4096) - 1
         
