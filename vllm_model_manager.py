@@ -79,14 +79,15 @@ class VLLMModelManager:
         # Initialize vLLM AsyncLLMEngine
         engine_args = AsyncEngineArgs(
             model=settings.model_name,
-            max_model_len=settings.max_model_len,
-            gpu_memory_utilization=0.95,  # Maximize VRAM on A40
+            max_model_len=1024,  # TTS prompts are short, 1024 is plenty
+            gpu_memory_utilization=0.85,  # Balanced for A40 + SNAC
             max_num_seqs=settings.max_num_seqs,
             tensor_parallel_size=settings.tensor_parallel_size,
             enforce_eager=False,  # Enable CUDA graphs for better throughput
             dtype="bfloat16",  # A40 supports bf16 natively
             enable_prefix_caching=True,  # Speed up TTFT for repeated patterns
-            block_size=16,  # Smaller blocks for better latency on short sequences
+            block_size=16,  # Smaller blocks for better latency
+            num_scheduler_steps=10,  # Multi-step scheduling to reduce CPU overhead
         )
         
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
