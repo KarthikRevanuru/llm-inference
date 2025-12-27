@@ -76,19 +76,30 @@ class VLLMModelManager:
         # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(settings.model_name)
         
+        import os
+        use_v1 = os.environ.get("VLLM_USE_V1", "0") == "1"
+        
         # Initialize vLLM AsyncLLMEngine
-        engine_args = AsyncEngineArgs(
-            model=settings.model_name,
-            max_model_len=1024,  # TTS prompts are short, 1024 is plenty
-            gpu_memory_utilization=0.90,  # Optimized for A40
-            max_num_seqs=32,  # Increased for better batching
-            tensor_parallel_size=settings.tensor_parallel_size,
-            enforce_eager=False,  # Enable CUDA graphs for better throughput
-            dtype="bfloat16",  # A40 supports bf16 natively
-            enable_prefix_caching=True,  # Speed up TTFT for repeated patterns
-            block_size=16,  # Smaller blocks for better latency
-            num_scheduler_steps=20,  # Increased further to reduce CPU sync overhead
-        )
+        engine_args_dict = {
+            "model": settings.model_name,
+            "max_model_len": 1024,  # TTS prompts are short, 1024 is plenty
+            "gpu_memory_utilization": 0.90,  # Optimized for A40
+            "max_num_seqs": 32,  # Increased for better batching
+            "tensor_parallel_size": settings.tensor_parallel_size,
+            "enforce_eager": False,  # Enable CUDA graphs for better throughput
+            "dtype": "bfloat16",  # A40 supports bf16 natively
+            "enable_prefix_caching": True,  # Speed up TTFT for repeated patterns
+            "block_size": 16,  # Smaller blocks for better latency
+        }
+        
+        # num_scheduler_steps is only for V0 engine (V1 handles it automatically)
+        if not use_v1:
+            engine_args_dict["num_scheduler_steps"] = 20
+            logger.info("Using V0 Engine with num_scheduler_steps=20")
+        else:
+            logger.info("Using V1 Engine (automatic multi-step scheduling)")
+
+        engine_args = AsyncEngineArgs(**engine_args_dict)
         
         self.engine = AsyncLLMEngine.from_engine_args(engine_args)
         
